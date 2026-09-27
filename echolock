@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""echolock: measure what an edge GPU does, not what it declares.
+
+  ./echolock build [--arch sm_121a]            build the CUDA probes into build/cuda/
+  ./echolock env                               print the environment snapshot (JSON)
+  ./echolock sample [--duration S]             stream 1 s environment samples (JSONL)
+  ./echolock kmsg                              stream kernel-log GPU/OOM/hang events (JSONL)
+  ./echolock run PROBE [options] [-- ARGS]     run a probe with env capture -> runs/<run_id>/
+  ./echolock report RUN_DIR... [--out FILE]    Markdown report; several runs side by side
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from run.plans import BACKENDS, PROBES, PlanOptions, binary, make_plan  # noqa: E402
+from run.runner import Run, RunOptions, new_run_id  # noqa: E402
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    cmd = ["make", "-C", str(ROOT / "backends" / "cuda"), f"ARCH={args.arch}"]
+    if args.nvcc:
+        cmd.append(f"NVCC={args.nvcc}")
+    return subprocess.call(cmd)
+
+
+def cmd_env(_: argparse.Namespace) -> int:
+    from env.capture import main
+    main()
+    return 0
+
+
+def cmd_sample(args: argparse.Namespace) -> int:
+    from env.sampler import main
+    sys.argv = ["sample", "--interval", str(args.interval), "--duration", str(args.duration)]
+    main()
+    return 0
+
+
+def cmd_kmsg(_: argparse.Namespace) -> int:
+    from env.kmsg import main
+    main()
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    exe = binary(args.backend, args.probe)
+    if not exe.exists():
+        print(f"{exe} is missing; run ./echolock build first", file=sys.stderr)
+        return 2
+    opts = RunOptions(out_root=Path(args.out), label=args.label,
+                      load={"name": args.label}, sample_interval_s=args.interval,
+                      drop_caches=args.drop_caches)
+    extra = args.probe_args
+    run_id = new_run_id(args.probe, args.backend, args.label)
+    run_dir = opts.out_root / run_id
+    plan_opts = PlanOptions(extra=extra, scratch_dir=Path(args.scratch_dir) if args.scratch_dir else None,
+                            pin_cpus=[int(c) for c in args.pin_cpus.split(",") if c],
+                            evict_file=args.evict_file)
+    run = Run(make_plan(args.probe, args.backend, run_dir, plan_opts), opts, run_id)
+    print(f"[echolock] {run.run_id}: {len(run.plan.steps)} step(s)", file=sys.stderr)
+    manifest = run.execute()
+    for s in manifest["steps"]:
+        print(f"[echolock]   {s['name']}: {s['status']} (rc={s['returncode']}, "
+              f"{(s['end_ns'] - s['start_ns']) / 1e9:.1f} s, {s['failed_checks']} failed checks)",
+              file=sys.stderr)
+    kl = manifest["kernel_log"]
+    print(f"[echolock] status {manifest['status']}; kernel events during run: "
+          f"{kl['during_run'] or 'none'}{'' if kl['available'] else ' (log unavailable: ' + str(kl['error']) + ')'}",
+          file=sys.stderr)
+    if not args.no_report:
+        from report.markdown import render
+        (run.dir / "report.md").write_text(render([run.dir]))
+    print(run.dir)
+    return 0 if manifest["status"] == "ok" else 1
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    from report.markdown import render
+    text = render([Path(d) for d in args.runs])
+    if args.out:
+        Path(args.out).write_text(text)
+    else:
+        print(text)
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="echolock", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    b = sub.add_parser("build", help="build the CUDA probes")
+    b.add_argument("--arch", default="sm_121a")
+    b.add_argument("--nvcc")
+    b.set_defaults(fn=cmd_build)
+
+    sub.add_parser("env", help="print the environment snapshot").set_defaults(fn=cmd_env)
+
+    s = sub.add_parser("sample", help="stream environment samples")
+    s.add_argument("--interval", type=float, default=1.0)
+    s.add_argument("--duration", type=float, default=0)
+    s.set_defaults(fn=cmd_sample)
+
+    sub.add_parser("kmsg", help="stream kernel-log events").set_defaults(fn=cmd_kmsg)
+
+    r = sub.add_parser("run", help="run a probe")
+    r.add_argument("probe", choices=PROBES)
+    r.add_argument("--backend", default="cuda", choices=BACKENDS)
+    r.add_argument("--label", default="idle", help="load condition name for this run")
+    r.add_argument("--out", default=str(ROOT / "runs"))
+    r.add_argument("--interval", type=float, default=1.0, help="sampler interval, s")
+    r.add_argument("--drop-caches", action="store_true",
+                   help="drop the page cache before each step (root or passwordless sudo)")
+    r.add_argument("--scratch-dir", help="file_page: directory for the scratch file (not tmpfs)")
+    r.add_argument("--evict-file", help="file_page: evict by reading this >RAM file instead of fadvise")
+    r.add_argument("--pin-cpus", default="", help="sync: also run blocking pinned to these CPUs, e.g. 0,10")
+    r.add_argument("--no-report", action="store_true")
+    r.set_defaults(fn=cmd_run)
+
+    rep = sub.add_parser("report", help="Markdown report for run directories")
+    rep.add_argument("runs", nargs="+")
+    rep.add_argument("--out")
+    rep.set_defaults(fn=cmd_report)
+
+    # Everything after a bare "--" goes to the probe untouched.
+    argv = sys.argv[1:]
+    probe_args: list[str] = []
+    if "--" in argv:
+        cut = argv.index("--")
+        argv, probe_args = argv[:cut], argv[cut + 1:]
+    args = ap.parse_args(argv)
+    args.probe_args = probe_args
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
