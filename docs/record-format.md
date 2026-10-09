@@ -57,7 +57,10 @@ involved) or `drm_sysfs`. `gpu` has one entry per GPU. From NVML: `sm_clock_mhz`
 `card`, and `clock_event_reasons` as the raw `gpu_metrics` throttle word
 (`clock_event_names` is null there: the bit meanings are asic-specific). From DRM, whatever the
 driver exposes. `host`: `cpu_khz` (per CPU), `thermal_c`, `hwmon`, `mem` (/proc/meminfo, KiB),
-`psi_memory`, `psi_cpu`, `loadavg`. `sample_cost_us` is how long the sample took to take.
+`psi_memory`, `psi_cpu`, `loadavg`. Hwmon sensors whose single read is slow (NVMe SMART, I2C SPD,
+Wi-Fi firmware -- 1-2 ms each) are read once per scan instead of per sample; when a sample
+includes such values it carries `host.hwmon_slow_age_s`, an upper bound on their age.
+`sample_cost_us` is how long the sample took to take.
 
 ## Kernel records (`src: kernel`, `type: kernel_event`, kernel.jsonl)
 

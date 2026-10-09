@@ -78,10 +78,20 @@ def thermal_zones() -> dict[str, float]:
     return out
 
 
-def hwmon() -> dict[str, float]:
-    """Every temp/power/freq/energy hwmon input, scaled to C, W, MHz, J."""
-    out = {}
+def hwmon_scan() -> tuple[list[tuple[str, str, float]], dict[str, float]]:
+    """Discovers the hwmon files worth reading and returns (fast, slow).
+
+    `fast` holds (path, output key, scale) tuples read every sample. `slow` holds key -> value for
+    sensors whose single read cost more than `HWMON_SLOW_US`: on this machine the NVMe composite
+    temperature (a SMART log fetch), the Wi-Fi PHY temperature (a firmware command) and I2C SPD
+    module sensors each cost 1-2 ms, together dwarfing everything else in the sample. Those are
+    read at rescan rate instead, so their values can be up to `HWMON_RESCAN_S` old -- the sample
+    says how old. Keys are deduplicated per hwmon instance, so two cards run by one driver
+    (an iGPU and a dGPU, both "amdgpu") no longer overwrite each other."""
     scale = {"temp": 1e-3, "power": 1e-6, "freq": 1e-6, "energy": 1e-6, "in": 1e-3, "curr": 1e-3}
+    fast: list[tuple[str, str, float]] = []
+    slow: dict[str, float] = {}
+    seen: set[str] = set()
     for mon in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
         name = read_text(f"{mon}/name") or Path(mon).name
         for f in sorted(glob.glob(f"{mon}/*_input") + glob.glob(f"{mon}/power*_average")):
@@ -89,13 +99,50 @@ def hwmon() -> dict[str, float]:
             kind = base.rstrip("0123456789")
             if kind not in scale:
                 continue
+            label = read_text(f"{mon}/{base}_label") or base
+            suffix = "_avg" if f.endswith("_average") else ""
+            key = f"{name}/{label}{suffix}"
+            if key in seen:
+                key = f"{key}@{Path(mon).name}"
+            seen.add(key)
+            t0 = time.monotonic_ns()
             v = read_int(f)
             if v is None:
                 continue
-            label = read_text(f"{mon}/{base}_label") or base
-            suffix = "_avg" if f.endswith("_average") else ""
-            out[f"{name}/{label}{suffix}"] = v * scale[kind]
+            if (time.monotonic_ns() - t0) / 1e3 > HWMON_SLOW_US:
+                slow[key] = v * scale[kind]
+            else:
+                fast.append((f, key, scale[kind]))
+    return fast, slow
+
+
+HWMON_SLOW_US = 500.0
+HWMON_RESCAN_S = 60.0
+_hwmon_fast: list[tuple[str, str, float]] = []
+_hwmon_slow: dict[str, float] = {}
+_hwmon_scanned = False
+_hwmon_scanned_ns = 0.0
+
+
+def hwmon() -> dict[str, float]:
+    """Every temp/power/freq/energy hwmon input, scaled to C, W, MHz, J. Slow sensors appear with
+    their scan-time value (see hwmon_scan); `hwmon_slow_age_s()` says how old those are."""
+    global _hwmon_fast, _hwmon_slow, _hwmon_scanned, _hwmon_scanned_ns
+    now = time.monotonic()
+    if not _hwmon_scanned or now - _hwmon_scanned_ns > HWMON_RESCAN_S:
+        _hwmon_fast, _hwmon_slow = hwmon_scan()
+        _hwmon_scanned, _hwmon_scanned_ns = True, now
+    out = dict(_hwmon_slow)
+    for path, key, scale in _hwmon_fast:
+        v = read_int(path)
+        if v is not None:
+            out[key] = v * scale
     return out
+
+
+def hwmon_slow_age_s() -> float:
+    """How old the slow-sensor values in the last hwmon() result are (0 when there are none)."""
+    return (time.monotonic() - _hwmon_scanned_ns) if _hwmon_slow else 0.0
 
 
 def drm_gpus() -> list[dict]:
@@ -146,6 +193,11 @@ class Sampler:
             "psi_cpu": pressure("cpu"),
             "loadavg": read_text("/proc/loadavg"),
         }
+        # Slow sensors (NVMe SMART, I2C SPD, Wi-Fi firmware) are read at scan rate, not per
+        # sample; their age is a bound on how stale those values are.
+        age = hwmon_slow_age_s()
+        if age:
+            rec["host"]["hwmon_slow_age_s"] = round(age, 1)
         rec["sample_cost_us"] = (time.monotonic_ns() - t0) / 1e3
         return rec
 
