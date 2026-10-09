@@ -189,15 +189,17 @@ __global__ void tile_kernel(uint4* dst, std::size_t n, const uint4* src, std::si
     }
 }
 
-// Streams the buffer once and folds every word into out4 (four u32, XOR).
-__global__ void read_kernel(const uint4* __restrict__ data, std::size_t n, unsigned* out4) {
+// Streams the buffer once and folds every word into out4 (four u32, XOR). Each launch folds its
+// per-rep nonce into lane x (xor_reduce_store), so an untouched slot cannot match the expectation.
+__global__ void read_kernel(const uint4* __restrict__ data, std::size_t n, unsigned* out4,
+                             unsigned nonce) {
     uint4 acc = make_uint4(0, 0, 0, 0);
     for (std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x; i < n;
          i += std::size_t(gridDim.x) * blockDim.x) {
         const uint4 v = __ldcs(data + i);
         acc.x ^= v.x; acc.y ^= v.y; acc.z ^= v.z; acc.w ^= v.w;
     }
-    xor_reduce_store(acc, out4);
+    xor_reduce_store(acc, out4, nonce);
 }
 
 // ---- GPU timing ---------------------------------------------------------------------------------
@@ -233,7 +235,7 @@ Series gpu_read_series(const Gpu& g, const void* ptr, std::size_t bytes, double 
     // Warm launch, also used to size the series.
     EL_CUDA(cudaMemsetAsync(g.slots, 0, 4 * sizeof(unsigned), g.stream));
     EL_CUDA(cudaEventRecord(g.events[0], g.stream));
-    read_kernel<<<g.grid(), 256, 0, g.stream>>>(data, n, g.slots);
+    read_kernel<<<g.grid(), 256, 0, g.stream>>>(data, n, g.slots, rep_nonce(-1));
     EL_CUDA(cudaGetLastError());
     EL_CUDA(cudaEventRecord(g.events[1], g.stream));
     EL_CUDA(cudaEventSynchronize(g.events[1]));
@@ -245,7 +247,7 @@ Series gpu_read_series(const Gpu& g, const void* ptr, std::size_t bytes, double 
     EL_CUDA(cudaMemsetAsync(g.slots, 0, std::size_t(reps) * 4 * sizeof(unsigned), g.stream));
     EL_CUDA(cudaEventRecord(g.events[0], g.stream));
     for (int r = 0; r < reps; ++r) {
-        read_kernel<<<g.grid(), 256, 0, g.stream>>>(data, n, g.slots + 4 * r);
+        read_kernel<<<g.grid(), 256, 0, g.stream>>>(data, n, g.slots + 4 * r, rep_nonce(r));
         EL_CUDA(cudaEventRecord(g.events[r + 1], g.stream));
     }
     EL_CUDA(cudaEventSynchronize(g.events[reps]));
@@ -260,7 +262,10 @@ Series gpu_read_series(const Gpu& g, const void* ptr, std::size_t bytes, double 
     for (int r = 0; r < reps; ++r) {
         float ms = 0;
         EL_CUDA(cudaEventElapsedTime(&ms, g.events[r], g.events[r + 1]));
-        const bool ok = slot_value(got, r) == expected;
+        const unsigned nonce = rep_nonce(r);
+        // The nonce makes this fail when a slot was never written -- including the zero-fill
+        // series, whose expectation is all zeros and would otherwise match an untouched slot.
+        const bool ok = slot_value(got, r) == fold_nonce(expected, nonce);
         s.bad_reps += ok ? 0 : 1;
         total_ms += ms;
         const double gbps = double(bytes) / (double(ms) * 1e-3) / 1e9;
@@ -273,7 +278,7 @@ Series gpu_read_series(const Gpu& g, const void* ptr, std::size_t bytes, double 
     measure(name, s.gbps, "GB/s", Obj(tags).integer("reps", reps).obj("per_rep", stats), s.verified);
     Obj detail;
     detail.str("series", name).obj("tags", tags).integer("reps", reps).integer("bad_reps", s.bad_reps)
-        .str("expected_xor", expected.hex());
+        .str("expected_xor", expected.hex()).uint("nonce_base", 0xA5A5A500u);
     if (!s.verified) {
         for (int r = 0; r < reps; ++r) {
             if (!(slot_value(got, r) == expected)) {
@@ -442,6 +447,7 @@ int main(int argc, char** argv) {
     Gpu g;
     g.sms = runtime_attr(cudaDevAttrMultiProcessorCount, dev);
     EL_CUDA(cudaStreamCreateWithFlags(&g.stream, cudaStreamNonBlocking));
+    declare_compiled_arch(g.stream);
     EL_CUDA(cudaMalloc(&g.slots, std::size_t(kMaxReps) * 4 * sizeof(unsigned)));
     g.events.resize(kMaxReps + 1);
     for (auto& e : g.events) { EL_CUDA(cudaEventCreate(&e)); }
@@ -449,8 +455,9 @@ int main(int argc, char** argv) {
 
     // 2. Generic compression: granted per the API, and whether zero-filled data reads faster.
     if (have_driver) {
-        double zero_gbps[2] = {0, 0};
-        int granted          = -1;
+        double zero_gbps[2]  = {0, 0};
+        bool zero_verified[2] = {false, false};
+        int granted           = -1;
         for (const bool want : {false, true}) {
             VmmBuffer b       = vmm_alloc(drv, opt.bytes, want);
             const char* alloc = want ? "vmm_compression_requested" : "vmm_plain";
@@ -464,9 +471,10 @@ int main(int argc, char** argv) {
             const Obj common = Obj().str("source", alloc).boolean("compression_granted",
                                                                  b.compression_granted);
             gpu_fill(g, p, b.size, false);
-            zero_gbps[want] = gpu_read_series(g, p, b.size, opt.seconds, Xor128{}, "gpu_read",
-                                              Obj(common).str("fill", "zero"))
-                                  .gbps;
+            const Series zs  = gpu_read_series(g, p, b.size, opt.seconds, Xor128{}, "gpu_read",
+                                               Obj(common).str("fill", "zero"));
+            zero_gbps[want]     = zs.gbps;
+            zero_verified[want] = zs.verified;
             gpu_fill(g, p, b.size, true);
             gpu_read_series(g, p, b.size, opt.seconds,
                             expected_fill_xor(b.size / 16, kFillSeed, host_threads), "gpu_read",
@@ -475,9 +483,13 @@ int main(int argc, char** argv) {
         }
         if (zero_gbps[0] > 0 && zero_gbps[1] > 0) {
             const double gain = zero_gbps[1] / zero_gbps[0];
-            feature("generic_compression", true, granted, gain >= 1.2,
+            // A gain computed from unverified reads is not evidence of anything.
+            const bool effect = zero_verified[0] && zero_verified[1] && gain >= 1.2;
+            feature("generic_compression", true, granted, effect,
                     Obj().num("zero_fill_gain", gain).num("threshold", 1.2)
-                        .num("plain_zero_gbps", zero_gbps[0]).num("requested_zero_gbps", zero_gbps[1]));
+                        .num("plain_zero_gbps", zero_gbps[0]).num("requested_zero_gbps", zero_gbps[1])
+                        .boolean("plain_verified", zero_verified[0])
+                        .boolean("requested_verified", zero_verified[1]));
         }
 
         // 2b. Real bytes: each sample tiled over the buffer, plain against compression requested.
@@ -486,7 +498,8 @@ int main(int argc, char** argv) {
             void* staged                          = nullptr;
             EL_CUDA(cudaMalloc(&staged, host.size()));
             EL_CUDA(cudaMemcpy(staged, host.data(), host.size(), cudaMemcpyHostToDevice));
-            double gbps[2] = {0, 0};
+            double gbps[2]      = {0, 0};
+            bool verified[2]    = {false, false};
             for (const bool want : {false, true}) {
                 VmmBuffer b = vmm_alloc(drv, opt.bytes, want);
                 if (!b.error.empty() || (want && !b.compression_granted)) {
@@ -501,19 +514,20 @@ int main(int argc, char** argv) {
                                                             host.size() / sizeof(uint4));
                 EL_CUDA(cudaGetLastError());
                 EL_CUDA(cudaStreamSynchronize(g.stream));
-                gbps[want] = gpu_read_series(
+                const Series s = gpu_read_series(
                                  g, reinterpret_cast<void*>(b.ptr), b.size, opt.seconds,
                                  tiled_xor(host, n), "gpu_read",
                                  Obj().str("source", want ? "vmm_compression_requested" : "vmm_plain")
                                      .str("fill", "sample:" + label)
-                                     .uint("sample_bytes", host.size()))
-                                 .gbps;
+                                     .uint("sample_bytes", host.size()));
+                gbps[want]    = s.gbps;
+                verified[want] = s.verified;
                 vmm_free(drv, b);
             }
             EL_CUDA(cudaFree(staged));
             if (gbps[0] > 0 && gbps[1] > 0) {
                 measure("compression_gain", gbps[1] / gbps[0], "x",
-                        Obj().str("fill", "sample:" + label), true);
+                        Obj().str("fill", "sample:" + label), verified[0] && verified[1]);
             }
         }
     }
@@ -554,7 +568,8 @@ int main(int argc, char** argv) {
             EL_CUDA(cudaMemcpyAsync(dev_buf, src, opt.bytes, cudaMemcpyHostToDevice, g.stream));
             EL_CUDA(cudaEventRecord(g.events[2 * r + 1], g.stream));
             read_kernel<<<g.grid(), 256, 0, g.stream>>>(static_cast<const uint4*>(dev_buf),
-                                                        opt.bytes / 16, g.slots + 4 * r);
+                                                        opt.bytes / 16, g.slots + 4 * r,
+                                                        rep_nonce(r));
         }
         EL_CUDA(cudaStreamSynchronize(g.stream));
         EL_CUDA(cudaGetLastError());
@@ -567,7 +582,7 @@ int main(int argc, char** argv) {
         for (int r = 0; r < reps; ++r) {
             float ms = 0;
             EL_CUDA(cudaEventElapsedTime(&ms, g.events[2 * r], g.events[2 * r + 1]));
-            const bool ok = slot_value(got, r) == host_data_xor;
+            const bool ok = slot_value(got, r) == fold_nonce(host_data_xor, rep_nonce(r));
             bad += ok ? 0 : 1;
             per.push_back(double(opt.bytes) / (double(ms) * 1e-3) / 1e9);
             measure("copy_payload", per.back(), "GB/s", tags, ok, r);

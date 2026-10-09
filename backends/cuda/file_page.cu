@@ -309,11 +309,19 @@ int main(int argc, char** argv) {
     const int sms = runtime_attr(cudaDevAttrMultiProcessorCount, 0);
     cudaStream_t stream;
     EL_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    declare_compiled_arch(stream);
 
     const std::uint64_t pages = o.bytes / kPageBytes;
     const int n               = o.phase == "cold-serial" ? o.serial_rows : o.rows;
     std::vector<std::uint32_t> row_pages(n);
     for (int i = 0; i < n; ++i) { row_pages[i] = static_cast<std::uint32_t>(row_page(i, pages)); }
+    // Two rows can land on the same page, and only the first of them faults. `rows` overstates
+    // the work a cold phase did, so every row measurement carries the honest counts alongside.
+    std::vector<std::uint32_t> sorted_pages(row_pages);
+    std::sort(sorted_pages.begin(), sorted_pages.end());
+    const int unique_pages = static_cast<int>(std::unique(sorted_pages.begin(), sorted_pages.end())
+                                             - sorted_pages.begin());
+    const int duplicate_rows = n - unique_pages;
     std::uint32_t *d_pages = nullptr, *d_out = nullptr;
     EL_CUDA(cudaMalloc(&d_pages, row_pages.size() * sizeof(std::uint32_t)));
     EL_CUDA(cudaMalloc(&d_out, std::size_t(n) * sizeof(std::uint32_t)));
@@ -321,7 +329,8 @@ int main(int argc, char** argv) {
                        cudaMemcpyHostToDevice));
     EL_CUDA(cudaMemset(d_out, 0, std::size_t(n) * sizeof(std::uint32_t)));
 
-    const Obj tags  = Obj().str("phase", o.phase).num("resident_before", resident);
+    const Obj tags = Obj().str("phase", o.phase).num("resident_before", resident)
+                           .integer("rows", n).integer("unique_pages", unique_pages);
     const auto reset = [&] {
         EL_CUDA(cudaMemsetAsync(d_out, 0, std::size_t(n) * sizeof(std::uint32_t), stream));
     };
@@ -359,13 +368,20 @@ int main(int argc, char** argv) {
             }
         }
         check(o.phase + ".row_xor", bad == 0,
-              Obj().integer("rows", n).integer("bad_rows", bad).integer("first_bad_row", first_bad));
+              Obj().integer("rows", n).integer("unique_pages", unique_pages)
+                  .integer("duplicate_rows", duplicate_rows).integer("bad_rows", bad)
+                  .integer("first_bad_row", first_bad));
         const double bytes = double(n) * kRowBytes;
         measure(serial ? "gpu_serial_rows" : "gpu_rows", t.gpu_s * 1e6 / n, "us/row", tags, bad == 0);
         measure(serial ? "gpu_serial_rows_bw" : "gpu_rows_bw", bytes / t.gpu_s / 1e6, "MB/s", tags,
                 bad == 0);
         measure(serial ? "gpu_serial_rows_wall" : "gpu_rows_wall", t.wall_s * 1e3, "ms", tags,
                 bad == 0);
+        if (cold) {
+            // Faults per second, counted in pages: duplicate rows on a faulted page are not faults.
+            measure("cold_fault_throughput", double(unique_pages) / t.gpu_s, "pages/s", tags,
+                    bad == 0);
+        }
     }
     emit_residency("after", resident_fraction(const_cast<std::uint32_t*>(base), o.bytes));
 

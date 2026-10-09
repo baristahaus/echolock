@@ -31,6 +31,11 @@ Exit codes: 0 ok, 1 runtime error, 2 usage, 3 verification failed.
 `step_start` {step, argv, drop_caches}, `step_end` {step, status, returncode, duration_s,
 timed_out, unkillable, interrupted}, `abort`, `stdout_text` {text}: a probe line that wasn't JSON.
 
+`drop_caches` is `ok`/`denied` only for steps marked eligible in `run/plans.py` when `--drop-caches`
+was given, and null otherwise. A step that manages page residency itself (file_page's resident and
+evict phases) is never eligible: a drop behind its back would evict the pages it is about to
+measure, and its "resident" numbers would silently describe cold pages.
+
 Step status is `ok`, `verify_failed`, `error`, `timeout` or `incomplete` (exit 0 with no
 `probe_end`). A run's status is its worst step's.
 
@@ -61,6 +66,30 @@ driver exposes. `host`: `cpu_khz` (per CPU), `thermal_c`, `hwmon`, `mem` (/proc/
 timestamp. `reset` covers a driver resetting the device, which means work was discarded: on AMD
 `gpu reset begin`, on NVIDIA a bus reset. Only events logged after the watcher started are
 written. Earlier ones are counted in `manifest.kernel_log.before_run`.
+
+The kernel numbers its records sequentially, so a jump between two consecutive reads means the
+ring lost messages before the watcher reached them. Each gap is written as a `kernel_event_gap`
+record (`lost`, `between_seq`), and `manifest.kernel_log` carries the totals: `lost_records` and
+`overruns` (EPIPE: the reader fell behind and had to resync). A report whose kernel log lost
+messages says so.
+
+## Probe notes worth knowing
+
+- **The oracle cannot pass vacuously.** Read kernels fold a per-rep nonce into lane x of their
+  result slot (`echolock.cuh`), and the host folds the same nonce into the expectation. A slot
+  nobody wrote (all zeros) therefore fails, including the zero-fill series whose expected XOR
+  really is zero. Without the nonce, a silent no-op launch would have passed as "read the zeros".
+- **file_page counts pages, not just rows.** Two random rows can share a 4 KiB page, and only the
+  first of them faults. Row measurements and the `*.row_xor` check carry `rows`, `unique_pages`
+  and `duplicate_rows`; cold phases also emit `cold_fault_throughput` in pages/s, the honest
+  fault rate.
+- **sync identifies its schedule from behaviour.** `sync_wait_cpu_fraction` is thread CPU time
+  over wall time while waiting in `cudaStreamSynchronize` (spin ≈1, blocking ≈0, yield between);
+  the `device_schedule` feature records requested vs granted flags and whether the wait behaved
+  as the requested schedule, with the identified schedule in its evidence.
+- **`cuda.compiled_arch`** is read out of the binary at runtime (`__CUDA_ARCH__`), and
+  `env.json`'s `toolchain.build` is the Makefile stamp (arch, nvcc, flags, built_utc); together
+  they say what a run's binaries were built for.
 
 ## Run directory
 

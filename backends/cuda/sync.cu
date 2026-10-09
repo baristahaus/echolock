@@ -13,6 +13,7 @@
 #include "common/echolock.cuh"
 
 #include <sched.h>
+#include <time.h>
 
 #include <fstream>
 
@@ -42,6 +43,15 @@ std::string read_line(const std::string& path) {
     std::string s;
     std::getline(f, s);
     return s;
+}
+
+// CPU time this thread has consumed, in us. Compared with the wall time of a synchronize wait,
+// it tells spin (ratio ~1) from yield (in between) from blocking (ratio ~0) -- the observable
+// difference between the schedules, measured instead of assumed from the granted flags.
+double thread_cpu_us() {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return double(ts.tv_sec) * 1e6 + double(ts.tv_nsec) / 1e3;
 }
 
 } // namespace
@@ -101,6 +111,7 @@ int main(int argc, char** argv) {
 
     cudaStream_t stream;
     EL_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    declare_compiled_arch(stream);
     ClockMap clock(stream);
     std::uint64_t* stamps = nullptr; // host: [0,1] spin start/end, [2] first node start
     EL_CUDA(cudaMallocHost(&stamps, 3 * sizeof(std::uint64_t)));
@@ -110,16 +121,25 @@ int main(int argc, char** argv) {
     EL_CUDA(cudaMalloc(&dev_count, sizeof(unsigned)));
 
     // 1. Completion lag: synchronize return time minus the kernel's end, on the host clock.
+    //    The wait's CPU fraction says which schedule the device is actually following.
+    const std::uint64_t longest_us =
+        *std::max_element(durations_us.begin(), durations_us.end());
+    std::vector<double> longest_fracs;
     for (const std::uint64_t us : durations_us) {
         const Obj tags = Obj().str("schedule", schedule).uint("kernel_us", us);
-        std::vector<double> lags;
+        std::vector<double> lags, fracs;
         int short_spins = 0, impossible = 0;
         double worst_rtt_us = 0;
         for (int it = 0; it < iterations; ++it) {
             const ClockMap::Sample cal = clock.calibrate();
             spin_kernel<<<1, 1, 0, stream>>>(us * 1000, dev_stamps);
+            const std::int64_t sync_t0 = mono_ns();
+            const double cpu0           = thread_cpu_us();
             EL_CUDA(cudaStreamSynchronize(stream));
             const std::int64_t returned = mono_ns();
+            const double wait_wall_us   = double(returned - sync_t0) / 1e3;
+            const double frac = wait_wall_us > 0 ? (thread_cpu_us() - cpu0) / wait_wall_us : 0.0;
+            fracs.push_back(frac);
             EL_CUDA(cudaMemcpy(stamps, dev_stamps, 2 * sizeof(std::uint64_t), cudaMemcpyDeviceToHost));
             const double spun_us = double(stamps[1] - stamps[0]) / 1e3;
             const double lag_us =
@@ -135,9 +155,29 @@ int main(int argc, char** argv) {
         }
         measure("sync_return_lag", summarize(lags).p50, "us",
                 Obj(tags).obj("per_rep", summary_obj(summarize(lags))), short_spins == 0 && impossible == 0);
+        measure("sync_wait_cpu_fraction", summarize(fracs).p50, "x",
+                Obj(tags).obj("per_rep", summary_obj(summarize(fracs))), true);
         check("spin_duration", short_spins == 0, Obj(tags).integer("short_spins", short_spins));
         check("clock_mapping", impossible == 0,
               Obj(tags).integer("negative_lags", impossible).num("worst_rtt_us", worst_rtt_us));
+        if (us == longest_us) { longest_fracs = fracs; }
+    }
+
+    // The schedule the device actually followed, identified from the wait's CPU fraction on the
+    // longest kernel (short waits are noise): spin burns the core (~1), blocking sleeps (~0),
+    // yield sits between. `auto` makes no promise, so for it the identification is the result.
+    if (!longest_fracs.empty()) {
+        const double f           = summarize(longest_fracs).p50;
+        const std::string which  = f > 0.9 ? "spin" : f < 0.15 ? "blocking" : "yield";
+        bool effect              = true;
+        if (schedule == "spin") { effect = f > 0.9; }
+        else if (schedule == "blocking") { effect = f < 0.15; }
+        else if (schedule == "yield") { effect = f >= 0.15 && f <= 0.9; }
+        feature("device_schedule", true, (granted_flags & 7) == flag ? 1 : 0, effect,
+                Obj().str("requested", schedule).str("identified", which)
+                    .num("wait_cpu_fraction_p50", f).uint("kernel_us", longest_us)
+                    .str("method", "thread CPU time / wall time while waiting in "
+                                   "cudaStreamSynchronize"));
     }
 
     // 2. Graph launch cost against node count.

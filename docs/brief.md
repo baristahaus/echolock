@@ -92,4 +92,8 @@ Also known:
 - What did the near-crashes look like (hangs, wrong results, sudden slowdowns, killed processes)?
   That decides which probes come first.
 - Which other edge devices are in scope next?
-- Public or private repo, and which license?
+
+## Decisions
+
+- Licence: MIT ([LICENSE](../LICENSE)).
+- Repo: public (github.com/baristahaus/echolock).

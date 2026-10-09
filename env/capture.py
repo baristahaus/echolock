@@ -164,10 +164,20 @@ def nvidia() -> dict:
 def toolchain() -> dict:
     nvcc = os.environ.get("NVCC") or shutil.which("nvcc") or "/usr/local/cuda/bin/nvcc"
     nvcc_out = run_cmd([nvcc, "--version"]) if os.path.exists(nvcc) else None
+    # What the probes were built with (backends/cuda/Makefile writes it), so a run says which
+    # arch its binaries target even when the toolchain has changed since.
+    stamp_path = ROOT / "build" / "cuda" / "build.json"
+    build = None
+    if stamp_path.is_file():
+        try:
+            build = json.loads(stamp_path.read_text())
+        except ValueError:
+            build = {"error": "build/cuda/build.json is not valid JSON"}
     return {
         "nvcc": nvcc_out.strip().splitlines()[-1] if nvcc_out else None,
         "vulkaninfo": (run_cmd(["vulkaninfo", "--summary"]) or "").strip()[:4000] or None,
         "python": platform.python_version(),
+        "build": build,
     }
 
 

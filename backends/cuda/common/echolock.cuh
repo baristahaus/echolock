@@ -203,6 +203,27 @@ inline int runtime_attr(cudaDeviceAttr a, int dev) {
     return v;
 }
 
+// The arch the device code was actually compiled for, read out of the binary at runtime. The
+// build stamp (build/cuda/build.json) says what was asked for; this says what the code is.
+__global__ void compiled_arch_kernel(int* out) {
+#if defined(__CUDA_ARCH__)
+    out[0] = static_cast<int>(__CUDA_ARCH__);
+#endif
+}
+
+inline void declare_compiled_arch(cudaStream_t stream) {
+    int* dev = nullptr;
+    int host = -1;
+    EL_CUDA(cudaMalloc(&dev, sizeof(int)));
+    EL_CUDA(cudaMemset(dev, 0, sizeof(int)));
+    compiled_arch_kernel<<<1, 1, 0, stream>>>(dev);
+    EL_CUDA(cudaStreamSynchronize(stream));
+    EL_CUDA(cudaMemcpy(&host, dev, sizeof(int), cudaMemcpyDeviceToHost));
+    EL_CUDA(cudaFree(dev));
+    declared("cuda.compiled_arch",
+             host > 0 ? "\"" + std::to_string(host / 10) + "\"" : "\"unknown\"", "__CUDA_ARCH__");
+}
+
 // Declares the device identity every CUDA probe records.
 inline void declare_device(int dev) {
     cudaDeviceProp p{};
@@ -297,6 +318,12 @@ class ClockMap {
 // Read kernels fold everything they load into a 128-bit XOR. The host knows the expected XOR from
 // the generator (or from its own copy of the bytes), so a read that returns wrong data, or skips
 // data, fails the check instead of posting a fast number.
+//
+// A slot that was never written holds zeros, and a zero-filled buffer is expected to XOR to zero
+// too -- so for zero data the check above cannot tell "read the zeros" from "read nothing". Every
+// launch therefore folds a per-rep nonce into lane x of its slot: the kernel's result is
+// expected^nonce, and an untouched slot (0) only matches when the nonce is zero, which it never is.
+// The host folds the same nonce into the expectation before comparing.
 
 struct Xor128 {
     std::uint32_t x = 0, y = 0, z = 0, w = 0;
@@ -309,7 +336,17 @@ struct Xor128 {
     }
 };
 
-__device__ __forceinline__ void xor_reduce_store(uint4 acc, unsigned* out4) {
+// The expectation for a launch that folded `nonce` into its slot.
+inline Xor128 fold_nonce(const Xor128& e, unsigned nonce) {
+    return {e.x ^ nonce, e.y, e.z, e.w};
+}
+
+// A per-launch nonce: never zero, different for every rep of a series.
+inline unsigned rep_nonce(long long rep) {
+    return 0xA5A5A500u ^ static_cast<unsigned>(rep + 1);
+}
+
+__device__ __forceinline__ void xor_reduce_store(uint4 acc, unsigned* out4, unsigned nonce = 0) {
     for (int s = 16; s > 0; s >>= 1) {
         acc.x ^= __shfl_xor_sync(0xffffffffu, acc.x, s);
         acc.y ^= __shfl_xor_sync(0xffffffffu, acc.y, s);
@@ -317,7 +354,9 @@ __device__ __forceinline__ void xor_reduce_store(uint4 acc, unsigned* out4) {
         acc.w ^= __shfl_xor_sync(0xffffffffu, acc.w, s);
     }
     if ((threadIdx.x & 31) == 0) {
-        atomicXor(out4 + 0, acc.x);
+        // The nonce is folded exactly once per launch (one thread), so it survives the reduction.
+        const unsigned n = (threadIdx.x == 0 && blockIdx.x == 0) ? nonce : 0u;
+        atomicXor(out4 + 0, acc.x ^ n);
         atomicXor(out4 + 1, acc.y);
         atomicXor(out4 + 2, acc.z);
         atomicXor(out4 + 3, acc.w);

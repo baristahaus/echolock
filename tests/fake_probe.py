@@ -12,7 +12,8 @@ def emit(type_, **fields):
 
 mode = sys.argv[1]
 emit("probe_start", params={"mode": mode})
-emit("declared", key="device.sm_count", value=48, source="fake")
+# Declared values differ per mode so the report's per-run declared columns have something to show.
+emit("declared", key="device.sm_count", value=48 if mode != "wrong" else 12, source="fake")
 if mode == "hang":
     time.sleep(60)
 print("a line that is not JSON", flush=True)

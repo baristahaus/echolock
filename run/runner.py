@@ -75,7 +75,11 @@ class RunOptions:
 
 
 def drop_page_cache() -> str:
-    """Drops clean page cache so a full cache from a previous step can't fail allocations."""
+    """Drops clean page cache so a full cache from a previous step can't fail allocations.
+
+    Only called before steps marked for it (Step.drop_caches): a step that manages page residency
+    itself -- file_page's resident and evict phases -- must not have the cache dropped behind its
+    back, or it would measure pages the runner itself evicted."""
     os.sync()
     try:
         Path("/proc/sys/vm/drop_caches").write_text("3\n")
@@ -246,7 +250,7 @@ class Run:
             self._probe_out.flush()
 
     def _run_step(self, step: Step, stderr_out) -> StepResult:
-        dropped = drop_page_cache() if self.opts.drop_caches else None
+        dropped = (drop_page_cache() if self.opts.drop_caches and step.drop_caches else None)
         self._runner_record("step_start", step=step.name, argv=step.argv, drop_caches=dropped)
         start = time.monotonic_ns()
         res = StepResult(step.name, step.argv, None, "error", start, start, drop_caches=dropped)

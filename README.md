@@ -34,7 +34,10 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 Utilities: `./echolock env` prints the environment snapshot, `./echolock sample` streams 1 s
 samples, and `./echolock kmsg` streams kernel GPU/OOM/hang events. Reading `/dev/kmsg` needs root
 or `kernel.dmesg_restrict=0`; without it the run still happens, and the manifest records that the
-kernel log was not watched. `--drop-caches` needs root or passwordless sudo.
+kernel log was not watched (and counts messages the ring lost). `--drop-caches` needs root or
+passwordless sudo, and only runs before steps that don't manage page residency themselves:
+file_page's resident and evict phases are never preceded by a drop, because that would evict the
+pages they are about to measure. Licence: MIT ([LICENSE](LICENSE)).
 
 Requirements: CUDA 13 toolkit (nvcc) and Python 3.11+ with the standard library only. The
 probes link the CUDA runtime statically and reach the driver API through entry points, so they

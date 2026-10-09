@@ -7,9 +7,10 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from report.markdown import render
-from run.plans import Plan, Step
+from run.plans import Plan, PlanOptions, Step, make_plan
 from run.runner import Run, RunOptions
 
 FAKE = [sys.executable, str(Path(__file__).with_name("fake_probe.py"))]
@@ -111,6 +112,67 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("FAILED `s` bw.xor", text)
         self.assertIn("## Notes", text)                    # what the probe chose not to measure
         self.assertIn("one section of the probe did not run", text)
+        # Declared values sit in one column per run, so a difference between runs is visible.
+        declared_row = next(l for l in text.splitlines() if l.startswith("| device.sm_count |"))
+        self.assertIn("| fake | 48 | 12 |", declared_row)
+        # Each step's own environment window is summarized below the whole-run table.
+        self.assertIn("Environment inside each step", text)
+
+
+class PlansTest(unittest.TestCase):
+    """--drop-caches must never run before a step that manages page residency itself: dropping
+    behind file_page's resident/evict phases would evict the pages they are about to measure."""
+
+    def test_file_page_eligibility(self):
+        plan = make_plan("file_page", "cuda", Path("/tmp/x"), PlanOptions())
+        by_name = {s.name: s.drop_caches for s in plan.steps}
+        for cold in ("prep", "warm", "cold-serial", "cold-rows"):
+            self.assertTrue(by_name[cold], cold)
+        for resident in ("res-seq", "res-rows", "evict", "res-rows-again"):
+            self.assertFalse(by_name[resident], resident)
+
+    def test_memory_and_sync_eligible(self):
+        for probe in ("memory", "sync"):
+            plan = make_plan(probe, "cuda", Path("/tmp/x"), PlanOptions())
+            self.assertTrue(all(s.drop_caches for s in plan.steps), probe)
+
+    def test_unknown_probe_or_backend(self):
+        with self.assertRaises(ValueError):
+            make_plan("nope", "cuda", Path("/tmp/x"), PlanOptions())
+        with self.assertRaises(ValueError):
+            make_plan("memory", "amd", Path("/tmp/x"), PlanOptions())
+
+
+class DropCachesGatingTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_steps(self, steps, drop_caches):
+        opts = RunOptions(out_root=self.root, label="idle", sample_interval_s=0.2,
+                          pre_roll_s=0.1, post_roll_s=0.1, capture_env=False,
+                          drop_caches=drop_caches)
+        return Run(Plan("fake", "test", steps), opts, run_id="run-dc")
+
+    def test_only_eligible_steps_drop(self):
+        run = self.run_steps([Step("drop", FAKE + ["ok"], drop_caches=True),
+                              Step("keep", FAKE + ["ok"], drop_caches=False)], True)
+        with mock.patch("run.runner.drop_page_cache", return_value="ok") as drop:
+            run.execute()
+        self.assertEqual(drop.call_count, 1)
+        starts = {json.loads(l)["step"]: json.loads(l)["drop_caches"]
+                  for l in (run.dir / "probe.jsonl").read_text().splitlines()
+                  if json.loads(l)["type"] == "step_start"}
+        self.assertEqual(starts, {"drop": "ok", "keep": None})
+
+    def test_flag_off_means_no_calls(self):
+        run = self.run_steps([Step("drop", FAKE + ["ok"], drop_caches=True)], False)
+        with mock.patch("run.runner.drop_page_cache", return_value="ok") as drop:
+            run.execute()
+        self.assertEqual(drop.call_count, 0)
 
 
 class InterruptTest(unittest.TestCase):

@@ -132,11 +132,13 @@ def env_lines(run: RunData) -> list[str]:
     fw = env.get("firmware", {}).get("dmi", {})
     driver = (smi.get("driver_version") or (nv.get("nvml") or {}).get("driver_version")
               or amd.get("driver_version") or "—")
+    built = (env.get("toolchain", {}).get("build") or {}).get("arch")
     lines = [
         f"- Host: {host.get('os', {}).get('pretty_name', '?')}, kernel {host.get('kernel', '?')}, "
         f"{host.get('machine', '?')}, {len(host.get('cpus', []))} CPUs",
         f"- Driver: {driver}; CUDA (driver) {smi.get('cuda_version') or '—'}; "
-        f"nvcc: {env.get('toolchain', {}).get('nvcc') or '—'}",
+        f"nvcc: {env.get('toolchain', {}).get('nvcc') or '—'}; "
+        f"probes built for {built or '—'}",
     ]
     for g in gpus:
         lines.append(f"- GPU: {g.get('product_name')} ({g.get('pci_device_id')}), "
@@ -214,6 +216,47 @@ def sample_stats(run: RunData) -> list[str]:
     return lines
 
 
+def step_env_rows(run: RunData) -> list[str]:
+    """Environment inside each step's own window, so a step's numbers can be read against what the
+    GPU was doing while it ran. A step shorter than the sample interval can fall between two
+    samples; the whole-run table above still brackets it, and such a step shows 0 samples."""
+    steps = [s for s in run.manifest.get("steps", [])
+             if isinstance(s.get("start_ns"), int) and isinstance(s.get("end_ns"), int)]
+    if not steps or not run.samples:
+        return []
+    out = ["Environment inside each step (samples between the step's start and end):", "",
+           "| Step | Samples | Clock MHz | Temp °C | Power W | Util % | MemAvail GiB |",
+           "|---|---:|---|---|---|---|---|"]
+    for s in steps:
+        win = [sm for sm in run.samples if s["start_ns"] <= sm.get("t_ns", 0) <= s["end_ns"]]
+        if not win:
+            out.append(f"| {s['name']} | 0 | — | — | — | — | — |")
+            continue
+        per_gpu: dict[int, dict[str, list[float]]] = {}
+        mem: list[int] = []
+        for sm in win:
+            for g in sm.get("gpu") or []:
+                d = per_gpu.setdefault(g.get("index", 0), {})
+                for k in ("sm_clock_mhz", "temp_c", "power_w", "util_gpu_pct"):
+                    if isinstance(g.get(k), (int, float)):
+                        d.setdefault(k, []).append(g[k])
+            ma = ((sm.get("host") or {}).get("mem") or {}).get("MemAvailable_kib")
+            if isinstance(ma, int):
+                mem.append(ma)
+
+        def cell(key: str) -> str:
+            parts = []
+            for _, d in sorted(per_gpu.items()):
+                v = d.get(key)
+                parts.append(f"{fmt(float(min(v)))}-{fmt(float(max(v)))}" if v else "—")
+            return ", ".join(parts) or "—"
+
+        ma_cell = fmt(min(mem) / 2 ** 20, "GiB") if mem else "—"
+        out.append(f"| {s['name']} | {len(win)} | {cell('sm_clock_mhz')} | {cell('temp_c')} | "
+                   f"{cell('power_w')} | {cell('util_gpu_pct')} | {ma_cell} |")
+    return out
+
+
 def render(run_dirs: list[Path]) -> str:
     runs = [RunData(d) for d in run_dirs]
     if not runs:
@@ -237,14 +280,27 @@ def render(run_dirs: list[Path]) -> str:
                    f"{ok}/{len(m.get('planned_steps', steps))} ok |")
     out += ["", "## Environment", "", *env_lines(first), ""]
 
-    # Declared.
-    declared: dict[str, tuple[str, str]] = {}
+    # Declared, one column per run, so a value that differs between runs (a clock under load,
+    # granted flags per schedule) reads side by side like the measurements do.
+    declared_rows: dict[str, dict] = {}
     for r in runs:
+        per_key: dict[str, list[dict]] = {}
         for d in r.of_type("declared"):
-            declared.setdefault(d["key"], (json.dumps(d.get("value")), d.get("source", "")))
-    if declared:
-        out += ["## Declared", "", "| Key | Value | Source |", "|---|---|---|"]
-        out += [f"| {k} | {v} | {src} |" for k, (v, src) in declared.items()]
+            per_key.setdefault(d.get("key", "?"), []).append(d)
+        for key, ds in per_key.items():
+            # One row when the run declares the key once; one row per step when it declares the
+            # same key in several steps (sync's device_flags, once per schedule).
+            for d in ds:
+                row_id = key if len(ds) == 1 else f"{key} [{d.get('step', '')}]"
+                row = declared_rows.setdefault(row_id, {"source": d.get("source", ""), "values": {}})
+                row["values"][r.label] = json.dumps(d.get("value"))
+    if declared_rows:
+        out += ["## Declared", "",
+                "| Key | Source | " + " | ".join(r.label for r in runs) + " |",
+                "|---|---|" + "---|" * len(runs)]
+        for rid, row in declared_rows.items():
+            cells = " | ".join(row["values"].get(r.label, "—") for r in runs)
+            out.append(f"| {rid} | {row['source']} | {cells} |")
         out.append("")
 
     # Measured, one column per run.
@@ -315,9 +371,17 @@ def render(run_dirs: list[Path]) -> str:
     # Environment during the run, and kernel events.
     for r in runs:
         out += [f"## During the run: {r.label}", "", *sample_stats(r), ""]
+        rows = step_env_rows(r)
+        if rows:
+            out += ["", *rows, ""]
         if r.problem:
             out += [f"Incomplete run directory: {r.problem}", ""]
         kl = r.manifest.get("kernel_log", {})
+        lost, overruns = kl.get("lost_records"), kl.get("overruns")
+        if isinstance(lost, int) and lost > 0:
+            out += [f"Kernel log lost {lost} message(s) while watching"
+                     f" ({overruns if isinstance(overruns, int) else 0} ring overrun(s)): "
+                     f"events around them may be missing.", ""]
         if not kl.get("available", False):
             out += [f"Kernel log not watched: {kl.get('error')}", ""]
         elif r.kernel:

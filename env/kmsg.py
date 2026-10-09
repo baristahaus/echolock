@@ -64,6 +64,17 @@ def classify(message: str) -> tuple[str, re.Match[str]] | None:
     return None
 
 
+def parse_seq(raw: str) -> int | None:
+    """The sequence number of a /dev/kmsg record, matched or not -- needed to notice losses."""
+    fields = raw.partition(";")[0].split(",")
+    if len(fields) < 3:
+        return None
+    try:
+        return int(fields[1])
+    except ValueError:
+        return None
+
+
 def parse_kmsg_record(raw: str) -> KernelEvent | None:
     """Parses one /dev/kmsg record ("prio,seq,ts_us,flags;message\\n key=value...")."""
     head, sep, rest = raw.partition(";")
@@ -89,7 +100,12 @@ def parse_kmsg_record(raw: str) -> KernelEvent | None:
 
 
 class KernelLogWatcher:
-    """Background thread that writes matching kernel log events as JSONL records to `out`."""
+    """Background thread that writes matching kernel log events as JSONL records to `out`.
+
+    The kernel numbers every record sequentially, so a jump in the sequence numbers of two
+    consecutive reads means messages were lost from the ring before this reader got to them.
+    Those losses are counted (and each gap written to `out`), because a report that is missing an
+    event must say so rather than look complete."""
 
     def __init__(self, out: IO[str] | None = None,
                  on_event: Callable[[KernelEvent], None] | None = None,
@@ -101,6 +117,11 @@ class KernelLogWatcher:
         self.history: list[KernelEvent] = []
         self.available = False
         self.error: str | None = None
+        self.lost_records = 0      # messages the ring lost before this reader reached them
+        self.overruns = 0         # EPIPE: the reader fell behind the ring and had to resync
+        self._last_seq: int | None = None
+        self._lost_before = 0      # losses already present in the boot history
+        self._overruns_before = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._fd: int | None = None
@@ -114,6 +135,7 @@ class KernelLogWatcher:
         self.available = True
         # Everything readable now predates the run.
         self._drain(history=True)
+        self._lost_before, self._overruns_before = self.lost_records, self.overruns
         self._thread = threading.Thread(target=self._loop, name="kmsg", daemon=True)
         self._thread.start()
         return self
@@ -139,6 +161,8 @@ class KernelLogWatcher:
             "error": self.error,
             "during_run": count(self.events),
             "xids_during_run": sorted({e.xid for e in self.events if e.xid is not None}),
+            "lost_records": self.lost_records - self._lost_before,
+            "overruns": self.overruns - self._overruns_before,
             "before_run": count(self.history),
             "before_run_last": [e.record() for e in self.history[-20:]],
         }
@@ -159,6 +183,7 @@ class KernelLogWatcher:
                 return
             except OSError as e:
                 if e.errno == errno.EPIPE:  # ring buffer overran our position; resume
+                    self.overruns += 1
                     continue
                 if e.errno == errno.EINVAL:
                     return
@@ -166,7 +191,9 @@ class KernelLogWatcher:
                 return
             if not raw:
                 return
-            event = parse_kmsg_record(raw.decode("utf-8", errors="replace"))
+            text  = raw.decode("utf-8", errors="replace")
+            self._track_seq(text, history)
+            event = parse_kmsg_record(text)
             if event is None:
                 continue
             if history:
@@ -178,6 +205,23 @@ class KernelLogWatcher:
                 self.out.flush()
             if self.on_event:
                 self.on_event(event)
+
+    def _track_seq(self, text: str, history: bool) -> None:
+        """Counts messages the ring lost between two consecutive reads. A gap in the boot history
+        is not this run's loss; a gap while the run is being watched is, and is recorded."""
+        seq = parse_seq(text)
+        if seq is None:
+            return
+        if self._last_seq is not None and seq > self._last_seq + 1:
+            lost = seq - self._last_seq - 1
+            self.lost_records += lost
+            if not history and self.out is not None:
+                self.out.write(json.dumps({"v": 1, "t_ns": time.monotonic_ns(),
+                                           "src": "kernel", "type": "kernel_event_gap",
+                                           "lost": lost,
+                                           "between_seq": [self._last_seq, seq]}) + "\n")
+                self.out.flush()
+        self._last_seq = seq
 
 
 def main() -> None:

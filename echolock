@@ -130,7 +130,8 @@ def main() -> int:
     r.add_argument("--out", default=str(ROOT / "runs"))
     r.add_argument("--interval", type=float, default=1.0, help="sampler interval, s")
     r.add_argument("--drop-caches", action="store_true",
-                   help="drop the page cache before each step (root or passwordless sudo)")
+                   help="drop the page cache before steps that don't manage page residency "
+                        "themselves (root or passwordless sudo)")
     r.add_argument("--scratch-dir", help="file_page: directory for the scratch file (not tmpfs)")
     r.add_argument("--evict-file", help="file_page: evict by reading this >RAM file instead of fadvise")
     r.add_argument("--pin-cpus", default="", help="sync: also run blocking pinned to these CPUs, e.g. 0,10")

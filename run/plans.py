@@ -21,6 +21,10 @@ class Step:
     timeout_s: float = 600.0
     # Steps whose failure makes the rest meaningless stop the run (e.g. file_page prep).
     required: bool = False
+    # May the page cache be dropped before this step? False for steps that manage page residency
+    # themselves (file_page's resident and evict phases): a drop behind their back would evict the
+    # pages they are about to measure.
+    drop_caches: bool = False
 
 
 @dataclass
@@ -55,14 +59,16 @@ def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Pla
     exe = str(binary(backend, probe))
 
     if probe == "memory":
-        return Plan(probe, backend, [Step("memory", [exe, *opts.extra], timeout_s=900)])
+        return Plan(probe, backend,
+                    [Step("memory", [exe, *opts.extra], timeout_s=900, drop_caches=True)])
 
     if probe == "sync":
-        steps = [Step(f"schedule={s}", [exe, "--schedule", s, *opts.extra], timeout_s=600)
+        steps = [Step(f"schedule={s}", [exe, "--schedule", s, *opts.extra], timeout_s=600,
+                      drop_caches=True)
                  for s in ("blocking", "yield", "spin", "auto")]
         steps += [Step(f"schedule=blocking,cpu={c}",
                        ["taskset", "-c", str(c), exe, "--schedule", "blocking", *opts.extra],
-                       timeout_s=600) for c in opts.pin_cpus]
+                       timeout_s=600, drop_caches=True) for c in opts.pin_cpus]
         return Plan(probe, backend, steps)
 
     # file_page. The scratch file must be on a page-cache-backed filesystem (not tmpfs), or
@@ -70,11 +76,17 @@ def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Pla
     scratch = (opts.scratch_dir or run_dir) / "file_page.scratch"
     common = ["--file", str(scratch), *opts.extra]
     evict = ["--evict", opts.evict_file] if opts.evict_file else []
-    steps = [Step("prep", [exe, "--phase", "prep", *common], required=True),
-             Step("warm", [exe, "--phase", "warm", *common], required=True)]
+    steps = [Step("prep", [exe, "--phase", "prep", *common], required=True, drop_caches=True),
+             Step("warm", [exe, "--phase", "warm", *common], required=True, drop_caches=True)]
+    # The resident phases measure pages the warm step put in the cache: no drop before them.
     for phase in ("res-seq", "res-rows"):
         steps.append(Step(phase, [exe, "--phase", phase, *common]))
+    # Evict tests its own eviction method; a drop right before it would measure a no-op.
     steps.append(Step("evict", [exe, "--phase", "evict", *common, *evict], timeout_s=900))
-    for phase in ("cold-serial", "cold-rows", "res-rows-again"):
-        steps.append(Step(phase, [exe, "--phase", phase, *common]))
+    # The cold phases want cold pages anyway, so a drop before them is a second chance at
+    # eviction if the evict step's method silently failed.
+    for phase in ("cold-serial", "cold-rows"):
+        steps.append(Step(phase, [exe, "--phase", phase, *common], drop_caches=True))
+    # res-rows-again re-reads the rows the cold phases faulted in: those pages must stay resident.
+    steps.append(Step("res-rows-again", [exe, "--phase", "res-rows-again", *common]))
     return Plan(probe, backend, steps, cleanup=[scratch])
