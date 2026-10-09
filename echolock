@@ -20,7 +20,17 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from run.plans import BACKENDS, PROBES, PlanOptions, binary, make_plan  # noqa: E402
-from run.runner import Run, RunOptions, new_run_id  # noqa: E402
+from run.runner import (Run, RunInterrupted, RunOptions, interrupt_exit_code,  # noqa: E402
+                        new_run_id)
+
+
+def aborted(run: Run, exc: BaseException) -> int:
+    """Ends a run that a signal cut short. The steps that finished are still usable: the manifest
+    and every stream up to the interrupt are on disk, and the step's process group was stopped."""
+    where = str(run.dir) if run.dir.exists() else "no run directory was created"
+    print(f"[echolock] interrupted by {run.interrupted or type(exc).__name__}; "
+          f"partial run in {where}", file=sys.stderr)
+    return interrupt_exit_code(exc)
 
 
 def cmd_build(args: argparse.Namespace) -> int:
@@ -65,7 +75,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                             evict_file=args.evict_file)
     run = Run(make_plan(args.probe, args.backend, run_dir, plan_opts), opts, run_id)
     print(f"[echolock] {run.run_id}: {len(run.plan.steps)} step(s)", file=sys.stderr)
-    manifest = run.execute()
+    try:
+        manifest = run.execute()
+    except (KeyboardInterrupt, RunInterrupted) as e:
+        return aborted(run, e)
     for s in manifest["steps"]:
         print(f"[echolock]   {s['name']}: {s['status']} (rc={s['returncode']}, "
               f"{(s['end_ns'] - s['start_ns']) / 1e9:.1f} s, {s['failed_checks']} failed checks)",

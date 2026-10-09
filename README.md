@@ -18,6 +18,7 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 | 3. Derived SM clock, pointer-chase latency map, per-format MMA throughput | not started |
 | 4. Load generators and grid runner | not started ([load/](load/README.md)) |
 | 5. Vulkan backend | not started ([backends/vulkan/](backends/vulkan/README.md)) |
+| AMD: environment, kernel log, docs | done on amdgpu hardware; probes still CUDA-only ([docs/amd.md](docs/amd.md)) |
 
 ## Quick start (on the GPU machine)
 
@@ -39,6 +40,11 @@ Requirements: CUDA 13 toolkit (nvcc) and Python 3.11+ with the standard library 
 probes link the CUDA runtime statically and reach the driver API through entry points, so they
 need no `-lcuda` and no vendor libraries.
 
+**AMD GPUs** are supported for the environment side today: clocks, temperature, power, utilisation,
+VRAM and kernel-log resets come from the `amdgpu` driver's own sysfs files, with no ROCm, no AMD
+SMI and no other library. What is open on AMD's side and what an AMD probe backend would use is
+written up in [docs/amd.md](docs/amd.md). The probes themselves are still CUDA-only.
+
 ## Layout
 
 ```
@@ -46,17 +52,19 @@ probes/<name>/spec.md     stimulus, oracle, parameters, metrics (backend-neutral
 backends/cuda/<name>.cu   CUDA implementation; common/echolock.cuh holds the JSONL, oracle and clock helpers
 backends/vulkan/          later
 load/                     background load generators (milestone 4)
-env/                      capture.py (versions, firmware, limits), sampler.py (1 s), kmsg.py (Xid watcher), nvml.py
+env/                      capture.py (versions, firmware, limits), sampler.py (1 s), kmsg.py (Xid watcher), nvml.py, amdgpu.py (AMD via sysfs)
 run/                      plans.py (probe → process steps), runner.py (steps + env → run directory)
 report/                   markdown.py: declared vs measured, one column per run label
-docs/                     brief.md (design), record-format.md (JSONL schema)
+docs/                     brief.md (design), record-format.md (JSONL schema), amd.md (AMD enablement)
 tests/                    python3 -m unittest discover -s tests -t .
 ```
 
 Each run writes `runs/<run_id>/` containing `manifest.json`, `env.json`, `probe.jsonl`,
 `samples.jsonl`, `kernel.jsonl`, `stderr.log` and `report.md`. Every stream uses CLOCK_MONOTONIC
-nanoseconds, so a kernel Xid lines up with the probe sample and the 1 s sample around it. Format:
-[docs/record-format.md](docs/record-format.md).
+nanoseconds, so a kernel Xid lines up with the probe sample and the 1 s sample around it. Ctrl-C or
+`kill` stops the probe's process group (it runs in its own session, so nothing else would) and
+keeps the partial run: the manifest is always written and the report reads the directory anyway.
+Format: [docs/record-format.md](docs/record-format.md).
 
 ## What changed from the ninfer-gb10 originals
 

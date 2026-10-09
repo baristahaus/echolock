@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable
 
+from . import amdgpu
 from .nvml import Nvml
 from .sampler import drm_gpus, meminfo, read_text
 
@@ -182,6 +183,7 @@ COLLECTORS: dict[str, Callable[[], object]] = {
     "firmware": firmware,
     "drm": drm_gpus,
     "nvidia": nvidia,
+    "amd": amdgpu.describe_all,
     "toolchain": toolchain,
     "echolock": echolock_revision,
 }

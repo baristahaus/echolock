@@ -1,6 +1,10 @@
 import json
+import os
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -9,6 +13,42 @@ from run.plans import Plan, Step
 from run.runner import Run, RunOptions
 
 FAKE = [sys.executable, str(Path(__file__).with_name("fake_probe.py"))]
+ONE_STEP = [sys.executable, str(Path(__file__).with_name("one_step.py"))]
+
+
+def child_pids(pid: int) -> list[int]:
+    """Direct children of `pid`, zombies excluded."""
+    out = []
+    for p in Path("/proc").iterdir():
+        if not p.name.isdigit():
+            continue
+        try:
+            status = (p / "status").read_text()
+        except OSError:
+            continue
+        for line in status.splitlines():
+            if line.startswith("PPid:"):
+                if int(line.split()[1]) == pid and process_state(int(p.name)) != "Z":
+                    out.append(int(p.name))
+                break
+    return out
+
+
+def process_state(pid: int) -> str | None:
+    """The scheduler state letter, or None when the pid is gone."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return None
+
+
+def wait_for(predicate, timeout: float = 20.0, every: float = 0.05) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        time.sleep(every)
+    return False
 
 
 def run_plan(root: Path, steps, label="idle"):
@@ -58,7 +98,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(m["status"], "error")
 
     def test_report_side_by_side(self):
-        a = run_plan(self.root, [Step("s", FAKE + ["ok"])], label="idle")
+        a = run_plan(self.root, [Step("s", FAKE + ["skips"])], label="idle")
         b = run_plan(self.root, [Step("s", FAKE + ["wrong"])], label="load50")
         a.execute()
         b.execute()
@@ -69,6 +109,87 @@ class RunnerTest(unittest.TestCase):
         self.assertTrue(row.rstrip(" |").endswith("✗"), row)  # load50's value failed its oracle
         self.assertIn("silent fallback", text)
         self.assertIn("FAILED `s` bw.xor", text)
+        self.assertIn("## Notes", text)                    # what the probe chose not to measure
+        self.assertIn("one section of the probe did not run", text)
+
+
+class InterruptTest(unittest.TestCase):
+    """Ctrl-C or `kill` must leave a readable run directory and must not leave the probe running:
+    a step is started in its own session, so nothing else would keep it off the GPU."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def interrupt(self, sig: signal.Signals) -> dict:
+        p = subprocess.Popen(ONE_STEP + [str(self.root), "hang"], stdout=subprocess.PIPE,
+                             text=True, start_new_session=True)
+        try:
+            run_dir = Path(p.stdout.readline().strip())
+            self.assertTrue(wait_for(lambda: child_pids(p.pid)),
+                            "the step's process never started")
+            probe = child_pids(p.pid)[0]
+            time.sleep(0.3)                       # let it get as far as writing a record
+            os.kill(p.pid, sig)
+            self.assertEqual(p.wait(timeout=30),
+                             130 if sig == signal.SIGINT else 143)   # 128 + signal
+            self.assertTrue(wait_for(lambda: (run_dir / "manifest.json").is_file()),
+                            f"no manifest in {run_dir}")
+            self.assertTrue(wait_for(lambda: process_state(probe) is None),
+                            f"probe pid {probe} outlived the run")
+            manifest = json.loads((run_dir / "manifest.json").read_text())
+            manifest["_dir"] = str(run_dir)
+            return manifest
+        finally:
+            for pid in child_pids(p.pid):
+                os.kill(pid, signal.SIGKILL)
+            p.kill()
+            p.wait(timeout=10)
+            p.stdout.close()
+
+    def test_ctrl_c(self):
+        m = self.interrupt(signal.SIGINT)
+        self.assertEqual(m["status"], "error")
+        self.assertEqual([s["name"] for s in m["steps"]], ["hang"])
+        self.assertTrue(m["steps"][0]["interrupted"], m["steps"][0])
+        self.assertIn("interrupted", m["status_note"])
+        self.assertIn("KeyboardInterrupt", m["status_note"])
+        self.assertIn("0/1", render([Path(m["_dir"])]))
+
+    def test_sigterm(self):
+        m = self.interrupt(signal.SIGTERM)
+        self.assertEqual(m["status"], "error")
+        self.assertIn("SIGTERM", m["status_note"])
+
+
+class BrokenRunDirTest(unittest.TestCase):
+    """A run killed before it wrote its manifest must still report, not crash the report."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        good = run_plan(self.root, [Step("s", FAKE + ["ok"])], label="idle")
+        good.execute()
+        self.good = good.dir
+        (self.root / "killed").mkdir()                                  # Ctrl-C before the manifest
+        (self.root / "corrupt").mkdir()
+        (self.root / "corrupt" / "manifest.json").write_text("{'status': 'ok'")
+        (self.root / "list").mkdir()
+        (self.root / "list" / "manifest.json").write_text("[1, 2]")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_render_survives(self):
+        text = render([self.good, self.root / "killed", self.root / "corrupt",
+                       self.root / "list", self.root / "absent"])
+        self.assertIn("unreadable", text)
+        self.assertIn("killed", text)
+        self.assertIn("## Measured", text)                              # the good run still reports
+        self.assertIn("No run directories", render([]))
 
 
 if __name__ == "__main__":

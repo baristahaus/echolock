@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import IO
 
+from . import amdgpu
 from .nvml import Nvml
 
 MEMINFO_KEYS = ("MemTotal", "MemFree", "MemAvailable", "Cached", "Dirty", "Writeback",
@@ -135,13 +136,7 @@ class Sampler:
     def sample(self) -> dict:
         t0 = time.monotonic_ns()
         rec: dict = {"v": 1, "t_ns": t0, "src": "sampler", "type": "sample"}
-        if self.nvml.available:
-            rec["gpu"] = [dict(index=i, **self.nvml.sample(h))
-                          for i, h in enumerate(self.nvml.handles)]
-            rec["gpu_source"] = "nvml"
-        else:
-            rec["gpu"] = drm_gpus()
-            rec["gpu_source"] = "drm_sysfs"
+        rec["gpu"], rec["gpu_source"] = self.gpu_state()
         rec["host"] = {
             "cpu_khz": cpu_freqs_khz(),
             "thermal_c": thermal_zones(),
@@ -153,6 +148,18 @@ class Sampler:
         }
         rec["sample_cost_us"] = (time.monotonic_ns() - t0) / 1e3
         return rec
+
+    def gpu_state(self) -> tuple[list[dict], str]:
+        """GPU values from the first source that has any, in order of trust: NVML when it loads,
+        then the amdgpu driver's own sysfs files (an AMD GPU needs no vendor library), then
+        whatever DRM exposes. `gpu_source` says which one produced the numbers."""
+        if self.nvml.available:
+            return ([dict(index=i, **self.nvml.sample(h))
+                     for i, h in enumerate(self.nvml.handles)], "nvml")
+        cards = amdgpu.sample_all()
+        if cards:
+            return cards, "amdgpu_sysfs"
+        return drm_gpus(), "drm_sysfs"
 
     def start(self) -> "Sampler":
         self._thread = threading.Thread(target=self._loop, name="sampler", daemon=True)

@@ -22,6 +22,19 @@ class ParseKmsg(unittest.TestCase):
         self.assertEqual(parse_kmsg_record(
             "3,2,3,-;INFO: task probe:99 blocked for more than 120 seconds.").category, "hang")
 
+    def test_amdgpu_and_reset(self):
+        # The two AMD forms that matter: an error/hang dump, and work the driver threw away.
+        self.assertEqual(parse_kmsg_record(
+            "3,7,99,-;amdgpu 0000:03:00.0: amdgpu: ring gfx_0.0.0 timeout, ring ready to run").category,
+            "gpu")
+        self.assertEqual(parse_kmsg_record(
+            "3,8,100,-;amdgpu 0000:03:00.0: amdgpu: MODE: (256) 0x1 0x0 0x0").category, "gpu")
+        self.assertEqual(parse_kmsg_record(
+            "3,9,101,-;amdgpu 0000:03:00.0: gpu reset begin, mask:0x3").category, "reset")
+        self.assertEqual(parse_kmsg_record(
+            "3,10,102,-;NVRM: gpu at 0000:01:00.0, pci:0000:01:00.0: GPU has fallen off the bus.").category,
+            "nvrm")
+
     def test_ignored_and_malformed(self):
         self.assertIsNone(parse_kmsg_record("6,1,2,-;usb 1-1: new high-speed USB device"))
         self.assertIsNone(parse_kmsg_record("garbage without separator"))

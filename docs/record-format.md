@@ -29,28 +29,42 @@ Exit codes: 0 ok, 1 runtime error, 2 usage, 3 verification failed.
 ## Runner records (`src: runner`, in probe.jsonl)
 
 `step_start` {step, argv, drop_caches}, `step_end` {step, status, returncode, duration_s,
-timed_out, unkillable}, `abort`, `stdout_text` {text}: a probe line that wasn't JSON.
+timed_out, unkillable, interrupted}, `abort`, `stdout_text` {text}: a probe line that wasn't JSON.
 
 Step status is `ok`, `verify_failed`, `error`, `timeout` or `incomplete` (exit 0 with no
 `probe_end`). A run's status is its worst step's.
 
+**Interrupted runs.** Ctrl-C or `kill` (SIGINT, SIGTERM, SIGHUP) stops the step's process group --
+the step runs in its own session, so the signal would otherwise not reach it and it would go on
+holding the GPU after the runner exited -- writes an `abort` record, and still writes
+`manifest.json`, whose `status_note` names the signal and how many steps ran. The interrupted step
+is listed with status `error` and `interrupted` true. `./echolock run` then exits 130 (Ctrl-C) or
+143 (`kill`). Everything recorded up to that point is intact.
+
 ## Sampler records (`src: sampler`, `type: sample`, samples.jsonl)
 
-`gpu_source` is `nvml` or `drm_sysfs`. `gpu` has one entry per GPU. From NVML: `sm_clock_mhz`,
+`gpu_source` is `nvml`, `amdgpu_sysfs` (the amdgpu driver's own sysfs files, no library
+involved) or `drm_sysfs`. `gpu` has one entry per GPU. From NVML: `sm_clock_mhz`,
 `graphics_clock_mhz`, `mem_clock_mhz`, `temp_c`, `power_w`, `energy_mj`, `util_gpu_pct`,
-`util_mem_pct`, `pstate`, `clock_event_reasons` (raw mask) and `clock_event_names`. From DRM,
-whatever the driver exposes. `host`: `cpu_khz` (per CPU), `thermal_c`, `hwmon`, `mem`
-(/proc/meminfo, KiB), `psi_memory`, `psi_cpu`, `loadavg`. `sample_cost_us` is how long the
-sample took to take.
+`util_mem_pct`, `pstate`, `clock_event_reasons` (raw mask) and `clock_event_names`. From
+`amdgpu_sysfs`: `sm_clock_mhz`, `mem_clock_mhz`, `temp_c`, `power_w`, `energy_mj`,
+`util_gpu_pct`, `util_mem_pct`, `pstate` (`D0`/`D3`), `vram_used_bytes`, `gtt_used_bytes`,
+`card`, and `clock_event_reasons` as the raw `gpu_metrics` throttle word
+(`clock_event_names` is null there: the bit meanings are asic-specific). From DRM, whatever the
+driver exposes. `host`: `cpu_khz` (per CPU), `thermal_c`, `hwmon`, `mem` (/proc/meminfo, KiB),
+`psi_memory`, `psi_cpu`, `loadavg`. `sample_cost_us` is how long the sample took to take.
 
 ## Kernel records (`src: kernel`, `type: kernel_event`, kernel.jsonl)
 
-`category` (`xid`, `sxid`, `nvrm`, `gpu`, `oom`, `hang`, `iommu`, `mce`), `priority`, `seq`,
-`message`, and for Xid lines `xid` and `device`. `t_ns` comes from the kernel's own timestamp.
-Only events logged after the watcher started are written. Earlier ones are counted in
-`manifest.kernel_log.before_run`.
+`category` (`xid`, `sxid`, `nvrm`, `gpu`, `reset`, `oom`, `hang`, `iommu`, `mce`), `priority`,
+`seq`, `message`, and for Xid lines `xid` and `device`. `t_ns` comes from the kernel's own
+timestamp. `reset` covers a driver resetting the device, which means work was discarded: on AMD
+`gpu reset begin`, on NVIDIA a bus reset. Only events logged after the watcher started are
+written. Earlier ones are counted in `manifest.kernel_log.before_run`.
 
 ## Run directory
 
 `manifest.json`, `env.json`, `probe.jsonl`, `samples.jsonl`, `kernel.jsonl`, `stderr.log`,
-`report.md`.
+`report.md`. A directory missing or broken in any of these still reports: the run's status cell
+says `unreadable` plus what could not be read, and whatever streams survived are laid out as
+usual. Only `probe.jsonl` carries the measurements, so that is the file worth recovering.

@@ -24,6 +24,8 @@ emit("measure", name="bw", value=101.0, unit="GB/s",
      tags={"source": "x", "reps": 3, "per_rep": {"min": 100.0, "max": 102.0}},
      verified=mode != "wrong")
 emit("check", name="bw.xor", **{"pass": mode != "wrong"}, detail={})
+if mode == "skips":
+    emit("note", message="pageableMemoryAccess=0: one section of the probe did not run")
 emit("feature", feature="compression", requested=True, granted=True, effect_observed=False,
      evidence={"gain": 1.0})
 if mode == "crash":

@@ -21,6 +21,7 @@ import signal
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -32,6 +33,16 @@ from .plans import Plan, Step
 
 # Overall status, worst first. A run's status is the worst of its steps'.
 STATUS_ORDER = ("error", "timeout", "verify_failed", "incomplete", "ok")
+
+
+class RunInterrupted(Exception):
+    """Raised by the SIGTERM/SIGHUP handler in place of the default immediate exit.
+
+    Ctrl-C needs no handler: Python already raises KeyboardInterrupt on the main thread. Both then
+    take the same path, which stops the step's process group and writes the manifest -- a step runs
+    in its own session (`start_new_session`), so nothing else would keep it off the GPU once this
+    process is gone.
+    """
 
 
 @dataclass
@@ -47,6 +58,7 @@ class StepResult:
     failed_checks: int = 0
     killed: bool = False
     unkillable: bool = False
+    interrupted: bool = False
     drop_caches: str | None = None
 
 
@@ -95,6 +107,11 @@ def new_run_id(probe: str, backend: str, label: str) -> str:
     return f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{probe}-{backend}-{label}"
 
 
+def interrupt_exit_code(exc: BaseException) -> int:
+    """The usual 128+signal convention, so a caller can tell Ctrl-C from `kill`."""
+    return 130 if isinstance(exc, KeyboardInterrupt) else 143
+
+
 class Run:
     def __init__(self, plan: Plan, opts: RunOptions, run_id: str | None = None):
         self.plan = plan
@@ -102,46 +119,71 @@ class Run:
         self.run_id = run_id or new_run_id(plan.probe, plan.backend, opts.label)
         self.dir = opts.out_root / self.run_id
         self._lock = threading.Lock()
+        self._probe_out = None                     # probe.jsonl, while the run holds it open
+        self._results: list[StepResult] = []   # filled by _run_step, so an interrupt still records
+        self._step_running: str | None = None
+        self.interrupted: str | None = None    # set when a signal ended the run
 
     def execute(self) -> dict:
         self.dir.mkdir(parents=True, exist_ok=False)
         started_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         t0 = time.monotonic_ns()
-        if self.opts.capture_env:
-            (self.dir / "env.json").write_text(json.dumps(capture(), indent=1))
+        self._results = []
+        watcher: KernelLogWatcher | None = None
+        sampler: Sampler | None = None
+        try:
+            if self.opts.capture_env:            # inside the try: a broken collector still leaves
+                (self.dir / "env.json").write_text(json.dumps(capture(), indent=1))
+            with self._terminal_signals(), \
+                 open(self.dir / "probe.jsonl", "w") as probe_out, \
+                 open(self.dir / "samples.jsonl", "w") as samples_out, \
+                 open(self.dir / "kernel.jsonl", "w") as kernel_out, \
+                 open(self.dir / "stderr.log", "w") as stderr_out:
+                self._probe_out = probe_out
+                watcher = KernelLogWatcher(out=kernel_out).start()
+                sampler = Sampler(samples_out, self.opts.sample_interval_s).start()
+                try:
+                    time.sleep(self.opts.pre_roll_s)
+                    for step in self.plan.steps:
+                        res = self._run_step(step, stderr_out)
+                        if step.required and res.status != "ok":
+                            self._runner_record("abort", step=step.name,
+                                                reason=f"required step ended {res.status}")
+                            break
+                    time.sleep(self.opts.post_roll_s)
+                except BaseException as e:                    # Ctrl-C, SIGTERM, MemoryError, ...
+                    self.interrupted = type(e).__name__ if not isinstance(e, RunInterrupted) \
+                        else str(e)
+                    if self._probe_out is not None and not self._probe_out.closed:
+                        self._runner_record("abort", step=self._step_running,
+                                            reason=f"run interrupted ({self.interrupted})")
+                    raise
+                finally:
+                    sampler.stop()
+                    watcher.stop()
+                    for path in self.plan.cleanup:
+                        try:
+                            path.unlink()
+                        except OSError:
+                            pass
+        finally:
+            # Always true, however the run ended: a run directory left without a manifest is a run
+            # directory no report can read.
+            manifest = self._manifest(t0, started_utc, watcher, sampler)
+        return manifest
 
-        results: list[StepResult] = []
-        with open(self.dir / "probe.jsonl", "w") as probe_out, \
-             open(self.dir / "samples.jsonl", "w") as samples_out, \
-             open(self.dir / "kernel.jsonl", "w") as kernel_out, \
-             open(self.dir / "stderr.log", "w") as stderr_out:
-            self._probe_out = probe_out
-            watcher = KernelLogWatcher(out=kernel_out).start()
-            sampler = Sampler(samples_out, self.opts.sample_interval_s).start()
-            try:
-                time.sleep(self.opts.pre_roll_s)
-                for step in self.plan.steps:
-                    res = self._run_step(step, stderr_out)
-                    results.append(res)
-                    if step.required and res.status != "ok":
-                        self._runner_record("abort", step=step.name,
-                                            reason=f"required step ended {res.status}")
-                        break
-                time.sleep(self.opts.post_roll_s)
-            finally:
-                sampler.stop()
-                watcher.stop()
-                for path in self.plan.cleanup:
-                    try:
-                        path.unlink()
-                    except OSError:
-                        pass
-
-        kernel = watcher.summary()
-        statuses = [r.status for r in results]
-        if len(results) < len(self.plan.steps):
+    def _manifest(self, t0: int, started_utc: str, watcher: KernelLogWatcher | None,
+                  sampler: Sampler | None) -> dict:
+        """Writes manifest.json from whatever has happened so far, and returns it."""
+        kernel = watcher.summary() if watcher else {"available": False,
+                                                   "error": "watcher never started",
+                                                   "during_run": {}, "before_run": {},
+                                                   "before_run_last": [], "xids_during_run": []}
+        statuses = [r.status for r in self._results]
+        if self.interrupted:
+            statuses.append("incomplete")       # the remaining steps did not run
+        elif len(self._results) < len(self.plan.steps):
             statuses.append("incomplete")
-        status = worst(statuses)
         manifest = {
             "v": 1,
             "run_id": self.run_id,
@@ -149,21 +191,52 @@ class Run:
             "backend": self.plan.backend,
             "label": self.opts.label,
             "load": self.opts.load,
-            "status": status,
+            "status": worst(statuses),
             "started_utc": started_utc,
             "t_start_ns": t0,
             "t_end_ns": time.monotonic_ns(),
             "sample_interval_s": self.opts.sample_interval_s,
-            "samples": sampler.count,
-            "steps": [asdict(r) for r in results],
+            "samples": sampler.count if sampler else 0,
+            "steps": [asdict(r) for r in self._results],
             "planned_steps": [s.name for s in self.plan.steps],
             "kernel_log": kernel,
         }
+        notes = []
         # A GPU fault during the run makes every number from it suspect.
         if kernel["during_run"].get("xid") or kernel["during_run"].get("sxid"):
-            manifest["status_note"] = "Xid logged during the run"
+            notes.append("Xid logged during the run")
+        if self.interrupted:
+            notes.append(f"interrupted by {self.interrupted}; "
+                         f"{len(self._results)} of {len(self.plan.steps)} steps ran")
+        if notes:
+            manifest["status_note"] = "; ".join(notes)
         (self.dir / "manifest.json").write_text(json.dumps(manifest, indent=1))
         return manifest
+
+    @contextmanager
+    def _terminal_signals(self):
+        """Turns `kill <pid>` and a hangup into RunInterrupted, so steps are stopped and the
+        manifest is written. Handlers are installed only where the disposition is still the
+        default, and restored on the way out."""
+        def handler(signum, _frame):
+            raise RunInterrupted(signal.Signals(signum).name)
+
+        saved = {}
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                if signal.getsignal(sig) is signal.SIG_DFL:
+                    signal.signal(sig, handler)
+                    saved[sig] = signal.SIG_DFL
+            except (OSError, ValueError):        # signals only work on the main thread
+                pass
+        try:
+            yield
+        finally:
+            for sig, old in saved.items():
+                try:
+                    signal.signal(sig, old)
+                except (OSError, ValueError):
+                    pass
 
     def _runner_record(self, type_: str, **fields) -> None:
         rec = {"v": 1, "t_ns": time.monotonic_ns(), "src": "runner", "type": type_,
@@ -177,6 +250,8 @@ class Run:
         self._runner_record("step_start", step=step.name, argv=step.argv, drop_caches=dropped)
         start = time.monotonic_ns()
         res = StepResult(step.name, step.argv, None, "error", start, start, drop_caches=dropped)
+        self._results.append(res)         # registered now, so an interrupt still reports this step
+        self._step_running = step.name
         try:
             proc = subprocess.Popen(step.argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True, bufsize=1, start_new_session=True)
@@ -225,6 +300,8 @@ class Run:
         for t in threads:
             t.start()
         timed_out = False
+        interrupted = False
+        step_exc: BaseException | None = None
         try:
             proc.wait(timeout=step.timeout_s)
         except subprocess.TimeoutExpired:
@@ -236,6 +313,13 @@ class Run:
             except subprocess.TimeoutExpired:
                 # Stuck in the driver (uninterruptible sleep): record it and move on.
                 res.unkillable = True
+        except BaseException as e:                    # KeyboardInterrupt, RunInterrupted
+            # The step is in its own session, so the signal that reached us did not reach it: it
+            # would go on holding the GPU after this process is gone. Stop its process group first.
+            interrupted, step_exc = True, e
+            res.killed = True
+            res.interrupted = True
+            self._kill(proc)
         for t in threads:
             t.join(timeout=5)
         for pipe in (proc.stdout, proc.stderr):
@@ -243,10 +327,14 @@ class Run:
                 pipe.close()
         res.end_ns = time.monotonic_ns()
         res.returncode = proc.returncode
-        res.status = step_status(proc.returncode, timed_out, saw_end[0])
+        res.status = "error" if interrupted else step_status(proc.returncode, timed_out, saw_end[0])
         self._runner_record("step_end", step=step.name, status=res.status,
                             returncode=proc.returncode, duration_s=(res.end_ns - start) / 1e9,
-                            timed_out=timed_out, unkillable=res.unkillable)
+                            timed_out=timed_out, unkillable=res.unkillable,
+                            interrupted=interrupted)
+        if interrupted:
+            raise step_exc                        # re-raised here, outside the handler, because the
+            # teardown above has to run whatever the interrupt was
         return res
 
     @staticmethod

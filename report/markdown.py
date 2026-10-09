@@ -14,10 +14,12 @@ from pathlib import Path
 
 
 def load_jsonl(path: Path) -> list[dict]:
-    if not path.exists():
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
         return []
     out = []
-    for line in path.read_text().splitlines():
+    for line in lines:
         try:
             rec = json.loads(line)
         except json.JSONDecodeError:
@@ -27,15 +29,36 @@ def load_jsonl(path: Path) -> list[dict]:
     return out
 
 
+def load_json(path: Path) -> tuple[dict, str | None]:
+    """Reads a JSON object, or says why it could not. A run whose records survived but whose
+    manifest did not is worth reading, so a broken one is reported, not fatal."""
+    try:
+        text = path.read_text()
+    except OSError as e:
+        return {}, f"{path.name}: {e.strerror}"
+    try:
+        obj = json.loads(text)
+    except ValueError as e:
+        return {}, f"{path.name}: {e}"
+    if not isinstance(obj, dict):
+        return {}, f"{path.name}: holds a {type(obj).__name__}, not an object"
+    return obj, None
+
+
 class RunData:
     def __init__(self, run_dir: Path):
         self.dir = run_dir
-        self.manifest = json.loads((run_dir / "manifest.json").read_text())
+        self.manifest, problem = load_json(run_dir / "manifest.json")
         env_path = run_dir / "env.json"
-        self.env = json.loads(env_path.read_text()) if env_path.exists() else {}
+        self.env = (load_json(env_path)[0] if env_path.is_file() else {})
         self.records = load_jsonl(run_dir / "probe.jsonl")
         self.samples = load_jsonl(run_dir / "samples.jsonl")
         self.kernel = load_jsonl(run_dir / "kernel.jsonl")
+        if not run_dir.is_dir():
+            problem = "not a directory"
+        elif not self.records and problem is None:
+            problem = "no probe records: the run was interrupted before any probe wrote one"
+        self.problem = problem
 
     @property
     def label(self) -> str:
@@ -95,23 +118,46 @@ def measurement_rows(run: RunData) -> dict[tuple[str, str, str], dict]:
     return summaries
 
 
+def fmt_bytes(v: object) -> str:
+    return f"{v / 2 ** 30:.0f} GiB" if isinstance(v, (int, float)) and v else "—"
+
+
 def env_lines(run: RunData) -> list[str]:
     env = run.env
     host = env.get("host", {})
     nv = env.get("nvidia", {})
     smi = (nv.get("smi") or {})
     gpus = smi.get("gpus") or []
+    amd = env.get("amd", {})
     fw = env.get("firmware", {}).get("dmi", {})
+    driver = (smi.get("driver_version") or (nv.get("nvml") or {}).get("driver_version")
+              or amd.get("driver_version") or "—")
     lines = [
         f"- Host: {host.get('os', {}).get('pretty_name', '?')}, kernel {host.get('kernel', '?')}, "
         f"{host.get('machine', '?')}, {len(host.get('cpus', []))} CPUs",
-        f"- Driver: {smi.get('driver_version') or (nv.get('nvml') or {}).get('driver_version') or '—'}; "
-        f"CUDA (driver) {smi.get('cuda_version') or '—'}; "
+        f"- Driver: {driver}; CUDA (driver) {smi.get('cuda_version') or '—'}; "
         f"nvcc: {env.get('toolchain', {}).get('nvcc') or '—'}",
     ]
     for g in gpus:
         lines.append(f"- GPU: {g.get('product_name')} ({g.get('pci_device_id')}), "
                      f"VBIOS {g.get('vbios_version')}, GSP firmware {g.get('gsp_firmware_version')}")
+    for c in amd.get("cards") or []:
+        sclk = (c.get("clocks") or {}).get("sclk") or {}
+        vram = f"{fmt_bytes(c.get('vram_total_bytes'))} {c.get('vram_vendor') or ''}".strip()
+        lines.append(f"- AMD GPU: {c.get('vendor_id')}:{c.get('device_id')} rev "
+                     f"{c.get('revision')} at {c.get('pci')}, {vram}, VBIOS "
+                     f"{c.get('vbios_version')}, driver {c.get('driver')}")
+        # What could move a measurement without anything asking it to.
+        lines.append(f"  - sclk {sclk.get('states')} MHz, active level {sclk.get('active')}, "
+                     f"performance level `{sclk.get('forced_level') or c.get('performance_level')}`, "
+                     f"overclock offsets: "
+                     f"{'applied' if c.get('overclock_applied') else 'none'}")
+    kfd = amd.get("kfd_nodes") or []
+    if kfd:
+        lines.append("- KFD nodes: " + ", ".join(
+            f"{n['node']}: {n.get('simd_count', 0) // 4} CU, "
+            + ", ".join(fmt_bytes(b.get("size_bytes")) for b in n.get("mem_banks") or [])
+            for n in kfd))
     if any(fw.values()):
         lines.append(f"- Platform firmware: {fw.get('sys_vendor')} {fw.get('product_name')}, "
                      f"BIOS {fw.get('bios_version')} ({fw.get('bios_date')})")
@@ -170,17 +216,25 @@ def sample_stats(run: RunData) -> list[str]:
 
 def render(run_dirs: list[Path]) -> str:
     runs = [RunData(d) for d in run_dirs]
+    if not runs:
+        return "# echolock\n\nNo run directories given.\n"
     first = runs[0]
-    probe = first.manifest.get("probe")
-    out = [f"# echolock: {probe} ({first.manifest.get('backend')})", ""]
+    probe = next((r.manifest.get("probe") for r in runs if r.manifest.get("probe")), "unknown probe")
+    backend = next((r.manifest.get("backend") for r in runs if r.manifest.get("backend")), "?")
+    out = [f"# echolock: {probe} ({backend})", ""]
     out.append("| Run | Label | Load | Status | Started (UTC) | Steps |\n|---|---|---|---|---|---|")
     for r in runs:
         m = r.manifest
         steps = m.get("steps", [])
         ok = sum(1 for s in steps if s.get("status") == "ok")
-        status = m.get("status") + (f" ({m['status_note']})" if m.get("status_note") else "")
-        out.append(f"| {m.get('run_id')} | {r.label} | {json.dumps(m.get('load'))} | {status} | "
-                   f"{m.get('started_utc')} | {ok}/{len(m.get('planned_steps', steps))} ok |")
+        status = m.get("status") or "unreadable"
+        if m.get("status_note"):
+            status += f" ({m['status_note']})"
+        if r.problem:
+            status += f" \u26a0 {r.problem}"
+        out.append(f"| {m.get('run_id') or r.dir} | {r.label} | {json.dumps(m.get('load'))} | "
+                   f"{status} | {m.get('started_utc')} | "
+                   f"{ok}/{len(m.get('planned_steps', steps))} ok |")
     out += ["", "## Environment", "", *env_lines(first), ""]
 
     # Declared.
@@ -235,6 +289,16 @@ def render(run_dirs: list[Path]) -> str:
         for e in r.of_type("error"):
             out.append(f"  - ERROR `{e.get('step')}`: {e.get('message')}")
     out.append("")
+    # What the probe chose not to measure, which is as much a result as what it did.
+    notes = [(r, n) for r in runs for n in r.of_type("note")]
+    if notes:
+        out += ["## Notes", "",
+                "Things a probe gave up on or skipped. A section of the probe that produced no "
+                "measurements and appears nowhere else appears only here.", ""]
+        for r, n in notes:
+            out.append(f"- {r.label} `{n.get('step')}`: {n.get('message')}")
+        out.append("")
+
     features = [(r, f) for r in runs for f in r.of_type("feature")]
     if features:
         out += ["## Requested features", "",
@@ -251,14 +315,18 @@ def render(run_dirs: list[Path]) -> str:
     # Environment during the run, and kernel events.
     for r in runs:
         out += [f"## During the run: {r.label}", "", *sample_stats(r), ""]
+        if r.problem:
+            out += [f"Incomplete run directory: {r.problem}", ""]
         kl = r.manifest.get("kernel_log", {})
         if not kl.get("available", False):
             out += [f"Kernel log not watched: {kl.get('error')}", ""]
         elif r.kernel:
             out += ["Kernel events during the run:", ""]
-            t0 = r.manifest.get("t_start_ns", 0)
+            t0 = r.manifest.get("t_start_ns") or 0
             for k in r.kernel:
-                out.append(f"- +{(k['t_ns'] - t0) / 1e9:.1f} s [{k.get('category')}] {k.get('message')}")
+                when = (f"+{(k['t_ns'] - t0) / 1e9:.1f} s"
+                        if t0 and isinstance(k.get("t_ns"), int) else "t unknown")
+                out.append(f"- {when} [{k.get('category')}] {k.get('message')}")
             out.append("")
         else:
             prior = kl.get("before_run") or {}

@@ -22,9 +22,12 @@ from typing import IO, Callable
 PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("xid", re.compile(r"NVRM: Xid \((?P<device>[^)]*)\): (?P<xid>\d+),\s*(?P<detail>.*)")),
     ("sxid", re.compile(r"NVRM: SXid \((?P<device>[^)]*)\): (?P<xid>\d+),\s*(?P<detail>.*)")),
+    # A reset means the driver threw the work away, which no number taken around it survives.
+    ("reset", re.compile(r"GPU reset|gpu reset begin|gpu reset (end|succeeded|failed)|"
+                         r"TDR:.*reset|bus resets?")),
     ("nvrm", re.compile(r"NVRM: .*(error|fault|failed|timeout|GPU has fallen off|reset)", re.I)),
-    ("gpu", re.compile(r"(amdgpu|i915|xe|panfrost|panthor|msm|nouveau|nova).*"
-                       r"(error|fault|hang|timeout|reset|ring .* timeout)", re.I)),
+    ("gpu", re.compile(r"(amdgpu|i915|xe|panfrost|panthor|msm|nouveau|nova)[^;]*?"
+                       r"(error|fault|hang|timeout|reset|ring \w+ trigger|MODE: \(\d+\))", re.I)),
     ("oom", re.compile(r"(invoked oom-killer|Out of memory|oom-kill:|Killed process)")),
     ("hang", re.compile(r"(blocked for more than \d+ seconds|soft lockup|hard LOCKUP|"
                         r"rcu_.*(stall|self-detected))")),

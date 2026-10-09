@@ -45,6 +45,13 @@ NVIDIA.
   Adreno. On NVIDIA, the proprietary Vulkan driver is a second closed view of the hardware, not an
   unwrapped one; where it disagrees with CUDA, that points at the driver. NVK (Mesa) would be an
   independent open path if it supports GB10; check before relying on it.
+- **AMD is open all the way down, which changes what can be derived there.** The environment layer
+  already reads an AMD GPU from the `amdgpu` driver's sysfs files with no library at all, so
+  nothing in the observation path is vendor code. RADV, the Vulkan driver for AMD, is open source
+  (unlike NVIDIA's), so a disagreement between CUDA and Vulkan on NVIDIA points at the driver
+  while agreement on AMD is evidence, not coincidence. AMD also publishes machine-readable ISA
+  and per-IP performance-counter documentation, which is enough to *check* an instruction-level
+  claim instead of repeating one. Details and citations: [amd.md](amd.md).
 - Probe *definitions* are backend-neutral: stimulus, oracle, parameters, metrics. Each backend
   implements them.
 
