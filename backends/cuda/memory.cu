@@ -564,6 +564,10 @@ int main(int argc, char** argv) {
     copy_series(pinned, "cudaHostAlloc_mapped");
     copy_series(pageable, "malloc_pageable");
 
+    // The copies above used dev_buf as their destination, so its random fill is gone; refill it
+    // before the contention phase reads it again.
+    gpu_fill(g, dev_buf, opt.bytes, true);
+
     // 4. CPU bandwidth, and CPU/GPU contention on the shared memory.
     const Obj cpu_tags = Obj().str("source", "malloc_pageable").integer("threads", opt.cpu_threads);
     emit_cpu_read("cpu_read", cpu_read(pageable, opt.bytes, opt.cpu_threads, opt.seconds * 2),

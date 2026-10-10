@@ -19,6 +19,7 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 | 4. Load generators and grid runner | done; loads measured + tested on this box, GPU load compiles (needs GB10 to run) ([load/](load/README.md)) |
 | 5. Vulkan backend | all six probes done and verified on AMD via RADV: memory, pointer_chase, mma (fp16/bf16/int8 bit-exact), sync, clock, file_page ([backends/vulkan/](backends/vulkan/README.md)) |
 | AMD: environment, kernel log, docs, full probe suite | done on amdgpu hardware; all six probes run on AMD via RADV and through `./echolock run` ([docs/amd.md](docs/amd.md)) |
+| NVIDIA discrete (sm_120, RTX 5090): first real-GPU run of the CUDA backend | all six probes pass on hardware; first run exposed and fixed three probe bugs: memory copies clobbered the device fill before the contention reads, the mma D-fragment store had d1/d2 swapped, and the mma fp8/fp4 `pack4` row/column addressing was wrong (plus a `declare_compiled_arch` stream-ordering race and a retry for transient calibration timeouts). fp4 needs the family build (`sm_121a`); on sm_120 it reports as not built. Runs alongside a resident inference engine with small `--gib`. |
 
 ## Quick start (on the GPU machine)
 

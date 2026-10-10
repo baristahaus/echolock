@@ -202,6 +202,20 @@ void emit_residency(const char* when, double fraction) {
 }
 
 void phase_prep(const Options& o) {
+    // Create the scratch file's directory (mkdir -p semantics); --scratch-dir may point somewhere
+    // that does not exist yet.
+    const std::size_t slash = o.file.rfind('/');
+    if (slash != std::string::npos && slash > 0) {
+        std::string dir = o.file.substr(0, slash);
+        for (std::size_t i = 1; i <= dir.size(); ++i) {
+            if (i == dir.size() || dir[i] == '/') {
+                const std::string part = dir.substr(0, i);
+                if (mkdir(part.c_str(), 0755) != 0 && errno != EEXIST) {
+                    fail("mkdir " + part + ": " + std::strerror(errno));
+                }
+            }
+        }
+    }
     const int fd = open(o.file.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0) { fail("open scratch: " + std::string(std::strerror(errno))); }
     std::vector<std::uint32_t> buf((1 << 20) / sizeof(std::uint32_t));

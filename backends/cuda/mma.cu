@@ -182,11 +182,20 @@ struct PtxFrags {
     unsigned a[4], b[2];
 };
 
-__device__ __forceinline__ unsigned pack4(const unsigned char* base, std::size_t row_bytes,
-                                          int k_byte) {
-    const unsigned char* p = base + row_bytes + std::size_t(k_byte);
+__device__ __forceinline__ unsigned pack4(const unsigned char* base, int k_byte) {
+    // base already points at the row's first byte; k_byte indexes the four bytes to pack.
+    const unsigned char* p = base + std::size_t(k_byte);
     return static_cast<unsigned>(p[0]) | (static_cast<unsigned>(p[1]) << 8) |
            (static_cast<unsigned>(p[2]) << 16) | (static_cast<unsigned>(p[3]) << 24);
+}
+
+__device__ __forceinline__ unsigned pack4_col(const unsigned char* base, int stride,
+                                              int k_byte) {
+    // Gathers four values from one column: p[r] = base[r * stride + k_byte]. Used for the B
+    // operand, where the four k values of a register sit `stride` bytes apart, not consecutively.
+    const unsigned char* p = base + std::size_t(k_byte);
+    return static_cast<unsigned>(p[0]) | (static_cast<unsigned>(p[1 * stride]) << 8) |
+           (static_cast<unsigned>(p[2 * stride]) << 16) | (static_cast<unsigned>(p[3 * stride]) << 24);
 }
 
 __device__ __forceinline__ unsigned bf16_pair(const __nv_bfloat16* p) {
@@ -211,12 +220,12 @@ __device__ __forceinline__ PtxFrags fill_frags(const unsigned char* A, const uns
     const int lane = threadIdx.x;
     const int g = lane >> 2, t = lane & 3;
     PtxFrags f;
-    f.a[0] = pack4(A, std::size_t(g) * 32, 4 * t);
-    f.a[1] = pack4(A, std::size_t(g + 8) * 32, 4 * t);
-    f.a[2] = pack4(A, std::size_t(g) * 32, 4 * t + 16);
-    f.a[3] = pack4(A, std::size_t(g + 8) * 32, 4 * t + 16);
-    f.b[0] = pack4(B + std::size_t(g), 8, 4 * t); // row-major B: row k_byte, col g
-    f.b[1] = pack4(B + std::size_t(g), 8, 4 * t + 16);
+    f.a[0] = pack4(A + std::size_t(g) * 32, 4 * t);
+    f.a[1] = pack4(A + std::size_t(g + 8) * 32, 4 * t);
+    f.a[2] = pack4(A + std::size_t(g) * 32, 4 * t + 16);
+    f.a[3] = pack4(A + std::size_t(g + 8) * 32, 4 * t + 16);
+    f.b[0] = pack4_col(B + std::size_t(4 * t) * 8 + g, 8, 0);      // B[k=4t..4t+3][col g]
+    f.b[1] = pack4_col(B + std::size_t(4 * t + 16) * 8 + g, 8, 0); // B[k=4t+16..4t+19][col g]
     return f;
 }
 
@@ -243,10 +252,11 @@ __device__ __forceinline__ PtxFrags fill_frags_bf16(const unsigned char* A_bytes
 __device__ __forceinline__ void store_d(float* out, const float* d) {
     const int lane = threadIdx.x;
     const int g = lane >> 2, t = lane & 3;
-    // D 16x8: c0 = C[g][2t], c1 = C[g+8][2t], c2 = C[g][2t+1], c3 = C[g+8][2t+1]
-    out[std::size_t(g) * 8 + 2 * t]     = d[0];
-    out[std::size_t(g + 8) * 8 + 2 * t] = d[1];
-    out[std::size_t(g) * 8 + 2 * t + 1] = d[2];
+    // D 16x8: d0 = D[g][2t], d1 = D[g][2t+1], d2 = D[g+8][2t], d3 = D[g+8][2t+1]. Verified against
+    // the exact host reference on sm_120 hardware (RTX 5090); the WMMA store agrees with it.
+    out[std::size_t(g) * 8 + 2 * t]         = d[0];
+    out[std::size_t(g) * 8 + 2 * t + 1]     = d[1];
+    out[std::size_t(g + 8) * 8 + 2 * t]     = d[2];
     out[std::size_t(g + 8) * 8 + 2 * t + 1] = d[3];
 }
 

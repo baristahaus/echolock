@@ -215,7 +215,9 @@ inline void declare_compiled_arch(cudaStream_t stream) {
     int* dev = nullptr;
     int host = -1;
     EL_CUDA(cudaMalloc(&dev, sizeof(int)));
-    EL_CUDA(cudaMemset(dev, 0, sizeof(int)));
+    // On the probe's non-blocking stream: a legacy-stream memset does not order against it, so the
+    // kernel could run before the memset and lose its write.
+    EL_CUDA(cudaMemsetAsync(dev, 0, sizeof(int), stream));
     compiled_arch_kernel<<<1, 1, 0, stream>>>(dev);
     EL_CUDA(cudaStreamSynchronize(stream));
     EL_CUDA(cudaMemcpy(&host, dev, sizeof(int), cudaMemcpyDeviceToHost));
@@ -284,20 +286,33 @@ class ClockMap {
         std::int64_t offset_ns = 0, rtt_ns = 0;
     };
 
-    Sample calibrate(int rounds = 200) {
+    Sample calibrate(int rounds = 200, int tries_per_round = 3) {
         Sample best{0, INT64_MAX};
         for (int r = 0; r < rounds; ++r) {
             const std::uint64_t seq = ++seq_;
-            const std::int64_t t0   = mono_ns();
-            calibration_stamp_kernel<<<1, 1, 0, stream_>>>(dev_, seq);
-            const std::int64_t deadline = t0 + std::int64_t{5'000'000'000};
-            while (host_[1] != seq) {
-                if (mono_ns() > deadline) { fail("clock calibration: stamp kernel never landed"); }
-            }
-            const std::int64_t t1 = mono_ns();
-            if (t1 - t0 < best.rtt_ns) {
-                best.rtt_ns    = t1 - t0;
-                best.offset_ns = (t0 + t1) / 2 - static_cast<std::int64_t>(host_[0]);
+            // The GPU can be briefly unresponsive while another process's context is working; a
+            // lost stamp is retried with the same sequence number instead of failing the probe.
+            for (int attempt = 0;; ++attempt) {
+                const std::int64_t t0 = mono_ns();
+                calibration_stamp_kernel<<<1, 1, 0, stream_>>>(dev_, seq);
+                const std::int64_t deadline = t0 + std::int64_t{5'000'000'000};
+                while (host_[1] != seq) {
+                    if (mono_ns() > deadline) {
+                        if (attempt + 1 < tries_per_round) { break; }
+                        const cudaError_t launch = cudaGetLastError();
+                        fail("clock calibration: stamp kernel never landed (launch "
+                             + std::string(cudaGetErrorString(launch)) + ", "
+                             + std::to_string(attempt + 1) + " attempts)");
+                    }
+                }
+                if (host_[1] == seq) {
+                    const std::int64_t t1 = mono_ns();
+                    if (t1 - t0 < best.rtt_ns) {
+                        best.rtt_ns    = t1 - t0;
+                        best.offset_ns = (t0 + t1) / 2 - static_cast<std::int64_t>(host_[0]);
+                    }
+                    break;
+                }
             }
         }
         last_ = best;

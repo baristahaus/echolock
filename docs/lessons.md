@@ -56,3 +56,28 @@ binding layout, push contents, grid size — before theorizing.
 
 Add new lessons at the bottom with a date and a one-line title. A lesson earns its place by
 having cost real debugging time here.
+
+## 4. Feed fp16 bits into a bf16 MMA and the oracle teaches you bit layouts (2026-10, mma/CUDA)
+
+First real-GPU run of the bf16 PTX path failed the element-wise oracle. Debugging went fastest
+by re-deriving the fragment layout from the hardware itself: WMMA's `load_matrix_sync` into a
+raw-register dump gives ground truth for A, and an identity-A times unique-valued-B run reads
+the B mapping straight out of D. One detour worth recording: fp16 bits reinterpreted as bf16
+produce astronomically wrong values that look like hardware breakage but are a test bug.
+
+## 5. Verify the whole pipeline, not just the fill (2026-10, mma/CUDA)
+
+The bf16 and fp8 failures had two independent causes: `store_d` had the D fragment's d1/d2
+registers swapped (masked so far because WMMA handles its own store on the fp16 path), and
+`pack4` added `row_bytes` to a base that already included the row offset — every A and B
+fragment read one row too far. A fill verified in isolation passes while the probe fails; test
+fill, instruction, and store together against an exact reference, and bisect by replacing one
+stage at a time with known-good indexing.
+
+## 6. A probe can invalidate its own stimulus (2026-10, memory/CUDA)
+
+The memory probe's copy phase used the device buffer as copy destination, destroying the random
+fill the later contention phase expected; the XOR oracle flagged it with the host pattern's
+fingerprint, which pinpointed the overwrite immediately. Give each stimulus buffer one owner,
+or refill before reuse — and be suspicious when a failure's value matches another buffer's
+expected XOR exactly.
