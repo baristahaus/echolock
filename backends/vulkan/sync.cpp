@@ -32,6 +32,7 @@ using namespace echolock;
 namespace {
 
 struct Options {
+    int device = 0;
     std::vector<double> durations_us = {50, 1000, 10000, 60000};
     int iterations = 30;
 };
@@ -51,6 +52,7 @@ Options parse(int argc, char** argv) {
                 pos = comma + 1;
             }
         } else if (a == "--iterations") { o.iterations = std::stoi(args.value(a)); }
+        else if (a == "--device") { o.device = std::stoi(args.value(a)); }
         else { args.usage_error("unknown argument " + a); }
     }
     if (o.iterations <= 0) { args.usage_error("iterations must be positive"); }
@@ -69,7 +71,7 @@ Summary apply_us(const Summary& s) {
 
 int main(int argc, char** argv) {
     const Options o = parse(argc, argv);
-    VkCtx ctx("sync", 0,
+    VkCtx ctx("sync", o.device,
               Obj().str("durations_us",
                         [&] {
                             std::string s;

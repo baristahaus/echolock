@@ -9,6 +9,7 @@ during the run, and kernel events.
 from __future__ import annotations
 
 import json
+import re
 import statistics
 from pathlib import Path
 
@@ -316,8 +317,17 @@ TAG_ALIASES = {
     "kind": {"vulkan_device_local": "device", "vulkan_host_visible": "pinned"},
     "source": {"vulkan_device_local": "cudaMalloc", "vulkan_host_visible": "cudaHostAlloc_mapped"},
 }
+
+# Metric names that mean the same measurement under different backend vocabularies: normalized
+# name plus tags the backend did not record (the format the name already carries).
+NAME_ALIASES = {
+    "fp16_tflops": ("mma_throughput", {"format": "fp16"}),
+    "bf16_tflops": ("mma_throughput", {"format": "bf16"}),
+    "int8_tflops": ("mma_throughput", {"format": "int8"}),
+}
 DROPPED_TAGS = {"heap_device_local", "heap_host_visible", "gpu_us", "copy_us", "verify_read_us",
-                "footprint_bytes"}
+                "footprint_bytes", "shape", "iters", "chains", "workgroups", "device",
+                "exec_span_us", "host_span_us"}
 
 # Relative tolerance per metric for the cross-stack verdict: both implementations must find the
 # same device behaviour, but they time through different APIs.
@@ -337,6 +347,23 @@ def _align_tags(tags: dict) -> dict:
     return out
 
 
+def _normalize(step: str, name: str, tags: dict) -> tuple[str, str, dict]:
+    """Backend vocabularies -> one canonical (step, name, tags). Regex aliases cover names that
+    encode a parameter (Vulkan's sync_<us>us.lag carries the duration in the name)."""
+    m = re.fullmatch(r"sync_(\d+)us\.lag", name)
+    if m:
+        # One step name: the CUDA probe steps over schedules, the Vulkan probe has no schedule
+        # axis, and the aligned comparison is the lag at each duration. The schedule tag stays
+        # behind: a blocking-schedule CUDA run and the Vulkan submission are different mechanisms,
+        # and the aligned question is the end-to-end lag.
+        name, step = "sync_return_lag", "sync"
+        tags = {"kernel_us": int(m.group(1))}
+    if name == "sync_return_lag" and "kernel_us" in tags:
+        # Canonical form on both backends: one step, one tag, the duration.
+        step, tags = "sync", {"kernel_us": int(tags["kernel_us"])}
+    return step, name, tags
+
+
 def cross_stack_section(runs: list[RunData], rows: list[dict]) -> list[str]:
     """Aligns equivalent (step, metric, tags) rows across backends and judges each pair against
     the metric's tolerance. Only pairs both backends measured appear; a one-sided row stays in
@@ -348,6 +375,11 @@ def cross_stack_section(runs: list[RunData], rows: list[dict]) -> list[str]:
             if e.get("verified") is False:
                 continue  # a failed oracle is not a result to compare
             tags = _align_tags(_parse_tags(tags_text_))
+            extra = NAME_ALIASES.get(name)
+            if extra:
+                name, injected = extra
+                tags.update(injected)
+            step, name, tags = _normalize(step, name, tags)
             per_backend.setdefault(backend, {})[(step, name, tags_text(tags))] = e
     backends = sorted(per_backend)
     if len(backends) < 2:

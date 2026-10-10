@@ -209,6 +209,11 @@ def cmd_crosscheck(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_platforms(args: argparse.Namespace) -> int:
+    from report.platforms import main
+    return main(args.runs + ([] if not args.out else ["--out", args.out]))
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     from report.markdown import render
     text = render([Path(d) for d in args.runs])
@@ -284,6 +289,11 @@ def main() -> int:
     rep.add_argument("--a-args", help="probe arguments for backend A, quoted")
     rep.add_argument("--b-args", help="probe arguments for backend B, quoted")
     rep.set_defaults(fn=cmd_crosscheck)
+
+    pl = sub.add_parser("platforms", help="platforms.md: one row per GPU/backend from run dirs")
+    pl.add_argument("runs", nargs="*", help="run directories; default: every run under runs/")
+    pl.add_argument("--out", default=str(ROOT / "docs" / "platforms.md"))
+    pl.set_defaults(fn=cmd_platforms)
 
     rep = sub.add_parser("report", help="Markdown report for run directories")
     rep.add_argument("runs", nargs="+")

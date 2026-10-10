@@ -47,6 +47,7 @@ constexpr int kChains = 8;
 constexpr std::uint32_t kM = 16, kN = 16, kK = 16;
 
 struct Options {
+    int device = 0;
     double seconds = 0.5;
     std::string formats = "fp16,bf16,int8";
     unsigned workgroups = 512;
@@ -60,6 +61,7 @@ Options parse(int argc, char** argv) {
         if (a == "--seconds") { o.seconds = std::stod(args.value(a)); }
         else if (a == "--formats") { o.formats = args.value(a); }
         else if (a == "--workgroups") { o.workgroups = std::stoul(args.value(a)); }
+        else if (a == "--device") { o.device = std::stoi(args.value(a)); }
         else { args.usage_error("unknown argument " + a); }
     }
     if (o.seconds <= 0 || o.workgroups == 0) { args.usage_error("values must be positive"); }
@@ -165,7 +167,7 @@ int main(int argc, char** argv) {
     mm.vulkanMemoryModel = VK_TRUE;
     stor8.pNext = &mm;
 
-    VkCtx ctx("mma", 0,
+    VkCtx ctx("mma", o.device,
               Obj().num("seconds", o.seconds).str("formats", o.formats)
                   .integer("chains", kChains).integer("workgroups", o.workgroups),
               {"VK_KHR_cooperative_matrix", "VK_KHR_vulkan_memory_model",

@@ -35,6 +35,7 @@ using namespace echolock;
 namespace {
 
 struct Options {
+    int device = 0;
     double seconds = 0.5;
     int reps = 20;
     unsigned workgroups = 512;
@@ -47,6 +48,7 @@ Options parse(int argc, char** argv) {
         if (a == "--seconds") { o.seconds = std::stod(args.value(a)); }
         else if (a == "--reps") { o.reps = std::stoi(args.value(a)); }
         else if (a == "--workgroups") { o.workgroups = std::stoul(args.value(a)); }
+        else if (a == "--device") { o.device = std::stoi(args.value(a)); }
         else { args.usage_error("unknown argument " + a); }
     }
     if (o.seconds <= 0 || o.reps <= 0 || o.workgroups == 0) {
@@ -87,7 +89,7 @@ std::string read_sclk() {
 
 int main(int argc, char** argv) {
     const Options o = parse(argc, argv);
-    VkCtx ctx("clock", 0,
+    VkCtx ctx("clock", o.device,
               Obj().num("seconds", o.seconds).integer("reps", o.reps)
                   .integer("workgroups", o.workgroups));
     ctx.declare_common();
