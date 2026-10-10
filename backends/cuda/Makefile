@@ -14,6 +14,7 @@ ARCH    ?= sm_121a
 OUT     ?= ../../build/cuda
 FLAGS   ?= -O3 -std=c++17 -lineinfo -Xcompiler -Wall,-Wextra
 PROBES  := memory file_page sync clock pointer_chase mma
+TOOLS   := gpuload
 STAMP   := $(OUT)/build.json
 
 ifeq ($(ARCH),sm_121a)
@@ -22,7 +23,7 @@ else
 GENCODE := -arch=$(ARCH)
 endif
 
-all: $(addprefix $(OUT)/,$(PROBES)) stamp
+all: $(addprefix $(OUT)/,$(PROBES)) $(addprefix $(OUT)/,$(TOOLS)) stamp
 
 # What the probes were built with; env/capture.py copies it into every run's env.json. PHONY so it
 # is refreshed with the current ARCH/NVCC even when the binaries themselves are up to date.
@@ -36,6 +37,6 @@ $(OUT)/%: %.cu common/echolock.cuh
 	$(NVCC) $(FLAGS) $(GENCODE) $(EXTRA) $< -o $@
 
 clean:
-	rm -f $(addprefix $(OUT)/,$(PROBES))
+	rm -f $(addprefix $(OUT)/,$(PROBES)) $(addprefix $(OUT)/,$(TOOLS))
 
 .PHONY: all clean stamp

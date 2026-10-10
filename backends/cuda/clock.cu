@@ -67,29 +67,8 @@ __global__ void spin_for_kernel(unsigned long long ns) {
     while (global_ns() - t0 < ns) {}
 }
 
-// Streams `data` until %globaltimer passes `until_ns`, folding every word (with a nonce) so the
-// load is verified work, not just traffic.
-__global__ void load_kernel(const uint4* __restrict__ data, std::size_t n, unsigned* out4,
-                             unsigned nonce, unsigned long long until_ns) {
-    uint4 acc = make_uint4(0, 0, 0, 0);
-    while (global_ns() < until_ns) {
-        for (std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x; i < n;
-             i += std::size_t(gridDim.x) * blockDim.x) {
-            const uint4 v = __ldcs(data + i);
-            acc.x ^= v.x; acc.y ^= v.y; acc.z ^= v.z; acc.w ^= v.w;
-        }
-    }
-    xor_reduce_store(acc, out4, nonce);
-}
-
-// Same fill kernel as the memory probe's, over the shared 16-byte word generator in
-// echolock.cuh (fill_word), so the load buffer's XOR is known.
-__global__ void fill_kernel(uint4* data, std::size_t n, std::uint32_t seed) {
-    for (std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x; i < n;
-         i += std::size_t(gridDim.x) * blockDim.x) {
-        data[i] = fill_word(i, seed);
-    }
-}
+// The load and fill kernels live in echolock.cuh (load_until_kernel, fill_kernel), verified
+// against the same fill generator the memory probe uses.
 
 double stamp_mhz(const Stamp& s) {
     const double dt_ns = double(s.t1_ns - s.t0_ns);
@@ -188,7 +167,7 @@ int main(int argc, char** argv) {
             + static_cast<unsigned long long>(o.seconds * 1.25e9);
         const unsigned nonce = rep_nonce(0);
         EL_CUDA(cudaMemsetAsync(slot, 0, 4 * sizeof(unsigned), load_stream));
-        load_kernel<<<sms * 8, 256, 0, load_stream>>>(buf, n, slot, nonce, until_ns);
+        load_until_kernel<<<sms * 8, 256, 0, load_stream>>>(buf, n, slot, nonce, until_ns);
         EL_CUDA(cudaGetLastError());
 
         const Obj load_tags = Obj().str("condition", "load").uint("load_bytes", bytes);

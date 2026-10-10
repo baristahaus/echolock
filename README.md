@@ -16,7 +16,7 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 | 1. Skeleton, environment capture, Xid watcher, 1 s sampler | done; needs a first run on GB10 |
 | 2. Port memory, file_page, sync with JSONL output | done (compiles for sm_121a; not yet run on GB10) |
 | 3. Derived SM clock, pointer-chase latency map, per-format MMA throughput | done (compiles for sm_121a incl. fp4; not yet run on GB10) |
-| 4. Load generators and grid runner | not started ([load/](load/README.md)) |
+| 4. Load generators and grid runner | done; loads measured + tested on this box, GPU load compiles (needs GB10 to run) ([load/](load/README.md)) |
 | 5. Vulkan backend | not started ([backends/vulkan/](backends/vulkan/README.md)) |
 | AMD: environment, kernel log, docs | done on amdgpu hardware; probes still CUDA-only ([docs/amd.md](docs/amd.md)) |
 
@@ -30,6 +30,7 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 ./echolock run clock                  # derived SM clock, idle and under a memory load
 ./echolock run pointer_chase --scratch-dir /path/on/nvme
 ./echolock run mma                    # fp16/bf16/tf32/int8/fp8/fp4 tensor throughput
+./echolock grid memory --conditions idle,cpu50,mem80   # one run per load condition
 ./echolock run memory -- --gib 2 --seconds 1          # after --: arguments for the probe
 ./echolock report runs/A runs/B       # several runs side by side (e.g. idle vs loaded)
 ```
@@ -58,7 +59,9 @@ probes/<name>/spec.md     stimulus, oracle, parameters, metrics (backend-neutral
 backends/cuda/<name>.cu   CUDA implementation; common/echolock.cuh holds the JSONL, oracle and clock helpers
 backends/vulkan/          later
 load/                     background load generators (milestone 4)
-env/                      capture.py (versions, firmware, limits), sampler.py (1 s), kmsg.py (Xid watcher), nvml.py, amdgpu.py (AMD via sysfs)
+env/                      capture.py (versions, firmware, limits), sampler.py (1 s), kmsg.py (Xid watcher), nvml.py, amdgpu.py
+load/                     load generators (cpu, mem, io, gpu) speaking one JSONL protocol
+run/                      plans.py (probe → process steps), runner.py (steps + env → run directory), grid.py (load conditions) (AMD via sysfs)
 run/                      plans.py (probe → process steps), runner.py (steps + env → run directory)
 report/                   markdown.py: declared vs measured, one column per run label
 docs/                     brief.md (design), record-format.md (JSONL schema), amd.md (AMD enablement)

@@ -216,6 +216,29 @@ def sample_stats(run: RunData) -> list[str]:
     return lines
 
 
+def load_lines(run: RunData) -> list[str]:
+    """What the load generator intended and achieved, from load.jsonl -- the grid axis made
+    checkable: a condition is only as good as the load actually reached."""
+    recs = load_jsonl(run.dir / "load.jsonl")
+    if not recs:
+        return []
+    start = next((r for r in recs if r.get("type") == "load_start"), None)
+    end = next((r for r in reversed(recs) if r.get("type") == "load_end"), None)
+    errs = [r for r in recs if r.get("type") == "load_error"]
+    if start is None:
+        return [f"- Load: records exist but no load_start (`{json.dumps(recs[:1])}`)"]
+    lines = [f"- Load `{start.get('load')}` intended `{json.dumps(start.get('intended'))}`"]
+    if end is not None:
+        lines.append(f"  - achieved `{json.dumps(end.get('achieved'))}` at stop")
+    heartbeats = [r for r in recs if r.get("type") == "heartbeat"]
+    if heartbeats:
+        lines.append(f"  - {len(heartbeats)} heartbeats, last "
+                      f"`{json.dumps(heartbeats[-1].get('achieved'))}`")
+    for e in errs:
+        lines.append(f"  - ERROR `{e.get('message')}`")
+    return lines
+
+
 def step_env_rows(run: RunData) -> list[str]:
     """Environment inside each step's own window, so a step's numbers can be read against what the
     GPU was doing while it ran. A step shorter than the sample interval can fall between two
@@ -374,6 +397,9 @@ def render(run_dirs: list[Path]) -> str:
         rows = step_env_rows(r)
         if rows:
             out += ["", *rows, ""]
+        load = load_lines(r)
+        if load:
+            out += ["### Load", "", *load, ""]
         if r.problem:
             out += [f"Incomplete run directory: {r.problem}", ""]
         kl = r.manifest.get("kernel_log", {})

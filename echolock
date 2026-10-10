@@ -94,6 +94,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0 if manifest["status"] == "ok" else 1
 
 
+def cmd_grid(args: argparse.Namespace) -> int:
+    from run.grid import GridOptions, run_grid
+    from report.markdown import render
+    opts = GridOptions(out_root=Path(args.out), conditions=args.conditions.split(","),
+                        settle_s=args.settle, ready_timeout_s=args.ready_timeout,
+                        sample_interval_s=args.interval,
+                        probe_args=args.probe_args,
+                        scratch_dir=Path(args.scratch_dir) if args.scratch_dir else None)
+    try:
+        dirs = run_grid(args.probe, args.backend, opts)
+    except (KeyboardInterrupt, RunInterrupted):
+        print("[echolock] grid interrupted; finished run directories are kept", file=sys.stderr)
+        return 130
+    if not args.no_report:
+        (opts.out_root / "grid-report.md").write_text(render(dirs))
+        print(opts.out_root / "grid-report.md")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     from report.markdown import render
     text = render([Path(d) for d in args.runs])
@@ -137,6 +156,20 @@ def main() -> int:
     r.add_argument("--pin-cpus", default="", help="sync: also run blocking pinned to these CPUs, e.g. 0,10")
     r.add_argument("--no-report", action="store_true")
     r.set_defaults(fn=cmd_run)
+
+    r = sub.add_parser("grid", help="run a probe under each load condition")
+    r.add_argument("probe", choices=PROBES)
+    r.add_argument("--backend", default="cuda", choices=BACKENDS)
+    r.add_argument("--conditions", default="idle",
+                   help="comma list: idle, cpu50, mem80, io500, gpu50")
+    r.add_argument("--out", default=str(ROOT / "runs"))
+    r.add_argument("--interval", type=float, default=1.0, help="sampler interval, s")
+    r.add_argument("--settle", type=float, default=2.0, help="s to wait after the load is ready")
+    r.add_argument("--ready-timeout", type=float, default=300.0,
+                   help="s to wait for the load's ready record (memfill needs this)")
+    r.add_argument("--scratch-dir")
+    r.add_argument("--no-report", action="store_true")
+    r.set_defaults(fn=cmd_grid)
 
     rep = sub.add_parser("report", help="Markdown report for run directories")
     rep.add_argument("runs", nargs="+")

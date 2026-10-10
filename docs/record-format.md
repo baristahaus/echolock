@@ -114,6 +114,8 @@ messages says so.
 ## Run directory
 
 `manifest.json`, `env.json`, `probe.jsonl`, `samples.jsonl`, `kernel.jsonl`, `stderr.log`,
-`report.md`. A directory missing or broken in any of these still reports: the run's status cell
+`report.md`, and `load.jsonl` when the run was taken under a load condition (the grid runner
+writes the load generator's records there: intended level, ready, heartbeats, achieved level at
+stop). A directory missing or broken in any of these still reports: the run's status cell
 says `unreadable` plus what could not be read, and whatever streams survived are laid out as
 usual. Only `probe.jsonl` carries the measurements, so that is the file worth recovering.

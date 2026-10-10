@@ -391,7 +391,7 @@ inline Xor128 slot_value(const std::vector<unsigned>& host, int r) {
     return {host[4 * r], host[4 * r + 1], host[4 * r + 2], host[4 * r + 3]};
 }
 
-// 16-byte word i of the random fill. Shared by the fill kernel and the host oracle.
+// Same 16-byte word generator as the memory probe's fill, so a load buffer's XOR is known.
 __host__ __device__ __forceinline__ uint4 fill_word(std::uint64_t i, std::uint32_t seed) {
     std::uint32_t x = seed ^ static_cast<std::uint32_t>(i * 2654435761ull) ^
                       static_cast<std::uint32_t>(i >> 32);
@@ -429,6 +429,28 @@ inline Xor128 expected_fill_xor(std::size_t n, std::uint32_t seed, unsigned thre
 inline std::int64_t gpu_now_ns(ClockMap& clock) {
     const ClockMap::Sample cal = clock.calibrate();
     return mono_ns() - cal.offset_ns;
+}
+
+// Streams `data` until %globaltimer passes `until_ns`, folding every word (with a nonce) so the
+// load is verified work, not just traffic. Shared by the clock probe's load and gpuload.
+__global__ void load_until_kernel(const uint4* __restrict__ data, std::size_t n, unsigned* out4,
+                                  unsigned nonce, unsigned long long until_ns) {
+    uint4 acc = make_uint4(0, 0, 0, 0);
+    while (global_ns() < until_ns) {
+        for (std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x; i < n;
+             i += std::size_t(gridDim.x) * blockDim.x) {
+            const uint4 v = __ldcs(data + i);
+            acc.x ^= v.x; acc.y ^= v.y; acc.z ^= v.z; acc.w ^= v.w;
+        }
+    }
+    xor_reduce_store(acc, out4, nonce);
+}
+
+__global__ void fill_kernel(uint4* data, std::size_t n, std::uint32_t seed) {
+    for (std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x; i < n;
+         i += std::size_t(gridDim.x) * blockDim.x) {
+        data[i] = fill_word(i, seed);
+    }
 }
 
 // Summary statistics of a series, for the summary records that accompany per-rep ones.
