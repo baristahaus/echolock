@@ -93,6 +93,23 @@ messages says so.
 - **`cuda.compiled_arch`** is read out of the binary at runtime (`__CUDA_ARCH__`), and
   `env.json`'s `toolchain.build` is the Makefile stamp (arch, nvcc, flags, built_utc); together
   they say what a run's binaries were built for.
+- **clock** derives the SM clock from `clock64()` over `%globaltimer` inside a kernel, one block
+  per SM, idle and under a verified memory load; `clock_trace` is the per-window series under
+  load, `clock_drop_ratio` the load/idle median, `declared_over_derived_ratio` the comparison
+  with what the API reports. Checks: the spin calibration, per-SM agreement, and a sane band
+  vs the declared clock.
+- **pointer_chase** times a dependent-load chain (nothing prefetchable) at `chase_hop_latency`
+  ns/hop per (kind, footprint, pattern), with `hop_cycles` alongside; `cold_fault_hop` and
+  `cold_fault_cost` come from the evicted-file walk, where a hop can include a 4 KiB fault and
+  the fault count is the pages the walk actually touches (known from the host's walk, not
+  estimated); `l2_vs_dram_delta` is the smallest-vs-largest device footprint difference. The
+  walk's visited XOR, hop count and final index are checked against the host's own walk.
+- **mma** verifies every format's result element-wise against an exact host reference before
+  and during the timed launches (all warps, all chains), then reports `mma_throughput` TFLOPS
+  per format and `format_ratio` fp16-relative. fp16/tf32/int8 use WMMA (layouts handled by the
+  compiler); bf16, fp8 e4m3 and fp4 e2m1 use hand-written PTX following the SM80 fragment
+  encodings. fp4 exists only in the family-specific build (`make ARCH=sm_121a` uses
+  `compute_121a`); with plain compute_121 the probe reports fp4 as not built instead of guessing.
 
 ## Run directory
 

@@ -43,7 +43,7 @@ class PlanOptions:
     evict_file: str | None = None                  # file_page: evict by reading this file
 
 
-PROBES = ("memory", "file_page", "sync")
+PROBES = ("memory", "file_page", "sync", "clock", "pointer_chase", "mma")
 BACKENDS = ("cuda",)
 
 
@@ -61,6 +61,24 @@ def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Pla
     if probe == "memory":
         return Plan(probe, backend,
                     [Step("memory", [exe, *opts.extra], timeout_s=900, drop_caches=True)])
+
+    if probe == "clock":
+        # One process: the idle measurement, the loaded trace and the load kernel share a context,
+        # so the derived clock and the load it runs under are one observation.
+        return Plan(probe, backend,
+                    [Step("clock", [exe, *opts.extra], timeout_s=600, drop_caches=True)])
+
+    if probe == "mma":
+        return Plan(probe, backend,
+                    [Step("mma", [exe, *opts.extra], timeout_s=600, drop_caches=True)])
+
+    if probe == "pointer_chase":
+        # The probe manages residency itself (resident walks then an evicted cold walk), so no
+        # drop before it -- that would evict the pages its resident walks are about to measure.
+        scratch = (opts.scratch_dir or run_dir) / "pointer_chase.scratch"
+        common = ["--file", str(scratch), *opts.extra]
+        return Plan(probe, backend,
+                    [Step("pointer_chase", [exe, *common], timeout_s=900)], cleanup=[scratch])
 
     if probe == "sync":
         steps = [Step(f"schedule={s}", [exe, "--schedule", s, *opts.extra], timeout_s=600,

@@ -386,6 +386,51 @@ inline Xor128 host_xor(const void* data, std::size_t bytes, unsigned threads) {
 
 inline unsigned hw_threads() { return std::max(1u, std::thread::hardware_concurrency()); }
 
+// Slot helpers shared by probes that check per-launch result slots (memory, clock).
+inline Xor128 slot_value(const std::vector<unsigned>& host, int r) {
+    return {host[4 * r], host[4 * r + 1], host[4 * r + 2], host[4 * r + 3]};
+}
+
+// 16-byte word i of the random fill. Shared by the fill kernel and the host oracle.
+__host__ __device__ __forceinline__ uint4 fill_word(std::uint64_t i, std::uint32_t seed) {
+    std::uint32_t x = seed ^ static_cast<std::uint32_t>(i * 2654435761ull) ^
+                      static_cast<std::uint32_t>(i >> 32);
+    uint4 v;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5; v.x = x;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5; v.y = x;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5; v.z = x;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5; v.w = x;
+    return v;
+}
+
+// Expected XOR of `n` fill words, computed on the host in parallel.
+inline Xor128 expected_fill_xor(std::size_t n, std::uint32_t seed, unsigned threads) {
+    const std::size_t per = (n + threads - 1) / threads;
+    std::vector<Xor128> part(threads);
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < threads; ++t) {
+        pool.emplace_back([&, t] {
+            Xor128 a;
+            for (std::size_t i = t * per, end = std::min(n, (t + 1) * per); i < end; ++i) {
+                const uint4 v = fill_word(i, seed);
+                a.x ^= v.x; a.y ^= v.y; a.z ^= v.z; a.w ^= v.w;
+            }
+            part[t] = a;
+        });
+    }
+    for (auto& th : pool) { th.join(); }
+    Xor128 r;
+    for (const auto& a : part) { r.add(a); }
+    return r;
+}
+
+// The GPU's current %globaltimer value, estimated on the host clock via a ClockMap calibration.
+// Accurate to the calibration round trip, which is what a load kernel's deadline needs.
+inline std::int64_t gpu_now_ns(ClockMap& clock) {
+    const ClockMap::Sample cal = clock.calibrate();
+    return mono_ns() - cal.offset_ns;
+}
+
 // Summary statistics of a series, for the summary records that accompany per-rep ones.
 struct Summary {
     double min = 0, p50 = 0, p90 = 0, max = 0, mean = 0;

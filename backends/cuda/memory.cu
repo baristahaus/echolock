@@ -141,37 +141,7 @@ void vmm_free(const Driver& d, VmmBuffer& b) {
 
 constexpr std::uint32_t kFillSeed = 0x1234567u;
 
-// 16-byte word i of the random fill. Shared by the fill kernel and the host oracle.
-__host__ __device__ __forceinline__ uint4 fill_word(std::uint64_t i, std::uint32_t seed) {
-    std::uint32_t x = seed ^ static_cast<std::uint32_t>(i * 2654435761ull) ^
-                      static_cast<std::uint32_t>(i >> 32);
-    uint4 v;
-    x ^= x << 13; x ^= x >> 17; x ^= x << 5; v.x = x;
-    x ^= x << 13; x ^= x >> 17; x ^= x << 5; v.y = x;
-    x ^= x << 13; x ^= x >> 17; x ^= x << 5; v.z = x;
-    x ^= x << 13; x ^= x >> 17; x ^= x << 5; v.w = x;
-    return v;
-}
-
-Xor128 expected_fill_xor(std::size_t n, std::uint32_t seed, unsigned threads) {
-    const std::size_t per = (n + threads - 1) / threads;
-    std::vector<Xor128> part(threads);
-    std::vector<std::thread> pool;
-    for (unsigned t = 0; t < threads; ++t) {
-        pool.emplace_back([&, t] {
-            Xor128 a;
-            for (std::size_t i = t * per, end = std::min(n, (t + 1) * per); i < end; ++i) {
-                const uint4 v = fill_word(i, seed);
-                a.x ^= v.x; a.y ^= v.y; a.z ^= v.z; a.w ^= v.w;
-            }
-            part[t] = a;
-        });
-    }
-    for (auto& th : pool) { th.join(); }
-    Xor128 r;
-    for (const auto& a : part) { r.add(a); }
-    return r;
-}
+// Expected XOR of `n` fill words -- shared helper in echolock.cuh (expected_fill_xor).
 
 __global__ void fill_kernel(uint4* data, std::size_t n, std::uint32_t seed, bool random) {
     for (std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x; i < n;
@@ -214,9 +184,7 @@ struct Gpu {
     dim3 grid() const { return dim3(sms * 8); }
 };
 
-Xor128 slot_value(const std::vector<unsigned>& host, int r) {
-    return {host[4 * r], host[4 * r + 1], host[4 * r + 2], host[4 * r + 3]};
-}
+// Slot helper shared with the other probes (slot_value in echolock.cuh).
 
 struct Series {
     double gbps     = 0; // bytes over total time

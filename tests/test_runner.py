@@ -142,6 +142,25 @@ class PlansTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_plan("memory", "amd", Path("/tmp/x"), PlanOptions())
 
+    def test_new_probes_wire_up(self):
+        """clock/mma take one step each; pointer_chase runs un-dropped (it manages residency)
+        and cleans its scratch file up like file_page does."""
+        clock = make_plan("clock", "cuda", Path("/tmp/x"), PlanOptions())
+        self.assertEqual([s.name for s in clock.steps], ["clock"])
+        self.assertTrue(clock.steps[0].drop_caches)
+        mma = make_plan("mma", "cuda", Path("/tmp/x"), PlanOptions())
+        self.assertEqual([s.name for s in mma.steps], ["mma"])
+        self.assertTrue(mma.steps[0].drop_caches)
+        pc = make_plan("pointer_chase", "cuda", Path("/tmp/x"), PlanOptions())
+        self.assertEqual([s.name for s in pc.steps], ["pointer_chase"])
+        self.assertFalse(pc.steps[0].drop_caches)
+        self.assertEqual([p.name for p in pc.cleanup], ["pointer_chase.scratch"])
+        self.assertIn("--file", pc.steps[0].argv)
+        # The scratch dir option moves the file.
+        pc2 = make_plan("pointer_chase", "cuda", Path("/tmp/x"),
+                        PlanOptions(scratch_dir=Path("/scratch")))
+        self.assertIn("/scratch/pointer_chase.scratch", pc2.steps[0].argv)
+
 
 class DropCachesGatingTest(unittest.TestCase):
     def setUp(self):
