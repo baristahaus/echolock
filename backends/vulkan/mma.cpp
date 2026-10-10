@@ -31,6 +31,9 @@
 
 #include "common/vk_ctx.h"
 
+#include <cstdio>
+#include <fstream>
+
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
@@ -50,6 +53,7 @@ struct Options {
     int device = 0;
     double seconds = 0.5;
     std::string formats = "fp16,bf16,int8";
+    std::string dump_matrix;
     unsigned workgroups = 512;
 };
 
@@ -62,6 +66,7 @@ Options parse(int argc, char** argv) {
         else if (a == "--formats") { o.formats = args.value(a); }
         else if (a == "--workgroups") { o.workgroups = std::stoul(args.value(a)); }
         else if (a == "--device") { o.device = std::stoi(args.value(a)); }
+        else if (a == "--dump-matrix") { o.dump_matrix = args.value(a); }
         else { args.usage_error("unknown argument " + a); }
     }
     if (o.seconds <= 0 || o.workgroups == 0) { args.usage_error("values must be positive"); }
@@ -72,10 +77,14 @@ bool wants(const Options& o, const std::string& f) {
     return o.formats.find(f) != std::string::npos;
 }
 
-// Exact operand patterns (same scheme as the CUDA mma probe): small values, exactly
-// representable in every format, so the host reference is exact.
-double a_pattern(int m, int k) { return double((m * 13 + k * 7) % 5) - 2.0; } // [-2, 2]
-double b_pattern(int k, int n) { return double((k * 11 + n * 5) % 5) - 2.0; } // [-2, 2]
+// Exact operand patterns (the SAME scheme and values as the CUDA mma probe, so a cross-backend
+// bit-exact comparison compares the same arithmetic): small values, exactly representable in
+// every format, so the host reference is exact.
+double a_pattern(int m, int k) { return 0.5 * double((m * 13 + k * 7) % 5); }  // [0, 2]
+double b_pattern(int k, int n) { return 0.5 * double((k * 11 + n * 5) % 5); }  // [0, 2]
+// The int8 operands take the CUDA probe's transform (CUDA: int(a*2)-3 on A, int(b*2)-2 on B).
+int int8_a(int m, int k) { return int(a_pattern(m, k) * 2) - 3; }  // [-3, 1]
+int int8_b(int k, int n) { return int(b_pattern(k, n) * 2) - 2; }  // [-2, 2]
 
 std::vector<double> reference() {
     std::vector<double> c(256, 0.0);
@@ -83,6 +92,18 @@ std::vector<double> reference() {
         for (int n = 0; n < 16; ++n) {
             double acc = 0.0;
             for (int k = 0; k < 16; ++k) { acc += a_pattern(m, k) * b_pattern(k, n); }
+            c[std::size_t(m) * 16 + n] = acc;
+        }
+    }
+    return c;
+}
+
+std::vector<double> reference_int8() {
+    std::vector<double> c(256, 0.0);
+    for (int m = 0; m < 16; ++m) {
+        for (int n = 0; n < 16; ++n) {
+            double acc = 0.0;
+            for (int k = 0; k < 16; ++k) { acc += double(int8_a(m, k)) * double(int8_b(k, n)); }
             c[std::size_t(m) * 16 + n] = acc;
         }
     }
@@ -232,6 +253,7 @@ int main(int argc, char** argv) {
                         .num("flops_per_kernel_iter", flops_per_iter).text());
 
     const std::vector<double> want = reference();
+    const std::vector<double> want_int8 = reference_int8();
 
     for (const FormatSpec& f : kFormats) {
         const std::string tag = f.name;
@@ -273,13 +295,13 @@ int main(int argc, char** argv) {
             auto* pb = static_cast<std::int8_t*>(b.mapped);
             for (int m = 0; m < 16; ++m) {
                 for (int k = 0; k < 16; ++k) {
-                    pa[std::size_t(m) * 16 + k] = std::int8_t(a_pattern(m, k));
+                    pa[std::size_t(m) * 16 + k] = std::int8_t(int8_a(m, k));
                 }
             }
             for (int k = 0; k < 16; ++k) {
                 for (int n = 0; n < 16; ++n) {
                     // B is loaded column-major (element (k,n) at n*16+k with stride 16)
-                    pb[std::size_t(n) * 16 + k] = std::int8_t(b_pattern(k, n));
+                    pb[std::size_t(n) * 16 + k] = std::int8_t(int8_b(k, n));
                 }
             }
         }
@@ -325,7 +347,7 @@ int main(int argc, char** argv) {
                     const std::size_t off = (std::size_t(wg) * kChains + std::size_t(j)) * 256;
                     for (std::size_t i = 0; i < 256; ++i) {
                         const double got = f.is_float ? double(got_f[off + i]) : double(got_i[off + i]);
-                        const double expect = want[i] * iters;
+                        const double expect = (f.is_float ? want : want_int8)[i] * iters;
                         if (got != expect) {
                             d.uint("wg", wg).integer("chain", j).uint("index", i)
                                 .num("got", got).num("expected", expect);
@@ -354,6 +376,42 @@ int main(int argc, char** argv) {
             d.uint("slot", verify_slot).uint("expected_slot", nonce).num("dispatch_us", verify_us);
             const bool ok = verify_slot == nonce && check_c(1, 1, 1.0, d); // one MulAdd
             check(tag + ".matrix", ok, d);
+
+            // Optional operand/result dump for the cross-backend bit-exact comparison
+            // (./echolock crosscheck --bitexact). One file per format: the logical A and B
+            // matrices (the values both backends multiply) and the raw result words.
+            if (!o.dump_matrix.empty()) {
+                std::vector<double> A(256), B(256);
+                for (int m = 0; m < 16; ++m) {
+                    for (int k = 0; k < 16; ++k) { A[std::size_t(m) * 16 + k] = a_pattern(m, k); }
+                }
+                for (int k = 0; k < 16; ++k) {
+                    for (int n = 0; n < 16; ++n) { B[std::size_t(k) * 16 + n] = b_pattern(k, n); }
+                }
+                std::vector<std::string> D;
+                D.reserve(256);
+                for (std::size_t i = 0; i < 256; ++i) {
+                    const std::uint32_t word = f.is_float
+                        ? (*reinterpret_cast<const std::uint32_t*>(static_cast<const float*>(c.mapped) + i))
+                        : std::uint32_t(static_cast<const std::int32_t*>(c.mapped)[i]);
+                    char buf[16];
+                    std::snprintf(buf, sizeof(buf), "%08x", word);
+                    D.emplace_back(buf);
+                }
+                std::ofstream out(o.dump_matrix + "." + tag + ".json");
+                out << "{\"format\": \"" << tag << "\", \"backend\": \"vulkan\",\n";
+                out << " \"A\": [";
+                for (std::size_t i = 0; i < A.size(); ++i) {
+                    out << (i ? ", " : "") << (f.is_float ? A[i] : double(int8_a(int(i / 16), int(i % 16))));
+                }
+                out << "],\n \"B\": [";
+                for (std::size_t i = 0; i < B.size(); ++i) {
+                    out << (i ? ", " : "") << (f.is_float ? B[i] : double(int8_b(int(i / 16), int(i % 16))));
+                }
+                out << "],\n \"D\": [";
+                for (std::size_t i = 0; i < D.size(); ++i) { out << (i ? ", " : "") << "\"" << D[i] << "\""; }
+                out << "]}\n";
+            }
         }
 
         // ---- throughput series -----------------------------------------------------------------
@@ -367,8 +425,12 @@ int main(int argc, char** argv) {
         double warm = 1e30;
         for (int i = 0; i < 3; ++i) { warm = std::min(warm, run_timed(1000, rep_nonce(-2))); }
         const double iters_target = o.seconds * 1e6 / std::max(1.0, warm / 1000.0);
+        // The throughput oracle requires want*iters to be exact in the accumulator. An fp32
+        // accumulator is exact to 2^24, and want <= 64, so past ~262k iterations the check would
+        // fail on rounding, not on hardware. Cap float formats there; s32 has no such limit.
+        const std::uint32_t iters_cap = f.is_float ? 200000u : 50000000u;
         const std::uint32_t iters =
-            std::uint32_t(std::max(1.0, std::min(5e7, std::round(iters_target))));
+            std::uint32_t(std::max(1.0, std::min(double(iters_cap), std::min(5e7, std::round(iters_target)))));
         std::vector<double> tflops;
         bool all_ok = true;
         for (long long rep = 0;; ++rep) {

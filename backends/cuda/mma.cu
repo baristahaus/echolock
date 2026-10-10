@@ -16,8 +16,12 @@
 
 #include "common/echolock.cuh"
 
+#include <cstdio>
+#include <fstream>
+
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <mma.h>
@@ -33,6 +37,7 @@ struct Options {
     double seconds      = 0.5; // target duration of one throughput series
     std::string formats = "fp16,bf16,tf32,int8,fp8,fp4";
     int blocks_per_sm   = 8;
+    std::string dump_matrix;           // cross-backend bit-exact comparison: dump A/B/D per format
 };
 
 Options parse(int argc, char** argv) {
@@ -44,6 +49,7 @@ Options parse(int argc, char** argv) {
         if (a == "--seconds") { o.seconds = std::stod(args.value(a)); }
         else if (a == "--formats") { o.formats = args.value(a); }
         else if (a == "--blocks-per-sm") { o.blocks_per_sm = std::stoi(args.value(a)); }
+        else if (a == "--dump-matrix") { o.dump_matrix = args.value(a); }
         else { args.usage_error("unknown argument " + a); }
     }
     if (o.seconds <= 0 || o.blocks_per_sm <= 0) { args.usage_error("values must be positive"); }
@@ -85,6 +91,28 @@ bool matrix_ok(const float* got, const std::vector<double>& want, Obj* detail) {
         }
     }
     return true;
+}
+
+// One dump file for the cross-backend bit-exact comparison: the logical A and B matrices (the
+// values both backends multiply) and the raw result words, so the comparison never re-parses
+// floats. `dwords` holds the raw 32-bit result words (float bits for fp formats, int bits for
+// int8); `ab` overrides A/B for the int8 transform.
+void dump_matrix_file(const std::string& path, const std::string& tag, const std::string& backend,
+                      const std::vector<double>& A, const std::vector<double>& B,
+                      const std::vector<std::uint32_t>& dwords) {
+    std::ofstream out(path + "." + tag + ".json");
+    out << "{\"format\": \"" << tag << "\", \"backend\": \"" << backend << "\",\n";
+    out << " \"A\": [";
+    for (std::size_t i = 0; i < A.size(); ++i) { out << (i ? ", " : "") << A[i]; }
+    out << "],\n \"B\": [";
+    for (std::size_t i = 0; i < B.size(); ++i) { out << (i ? ", " : "") << B[i]; }
+    out << "],\n \"D\": [";
+    for (std::size_t i = 0; i < dwords.size(); ++i) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "\"%08x\"", dwords[i]);
+        out << (i ? ", " : "") << buf;
+    }
+    out << "]}\n";
 }
 
 bool matrix_ok_int(const int* got, const std::vector<double>& want, Obj* detail) {
@@ -314,8 +342,11 @@ SeriesResult timed_series(cudaStream_t stream, const std::function<void(int)>& l
     EL_CUDA(cudaEventSynchronize(t1));
     float warm_ms = 0;
     EL_CUDA(cudaEventElapsedTime(&warm_ms, t0, t1));
+    // The throughput oracle requires want*iters to be exact in the accumulator: an fp32
+    // accumulator is exact to 2^24 and want <= 64, so past ~262k iterations the check would fail
+    // on rounding, not on hardware. Cap there (s32 could go higher; one cap keeps it simple).
     const int iters = std::clamp(static_cast<int>(seconds * 1000.0 / std::max(warm_ms, 0.001f)),
-                                 4096, 4000000);
+                                 4096, 200000);
 
     std::vector<double> per;
     int bad = 0;
@@ -395,6 +426,19 @@ int main(int argc, char** argv) {
         check(fmt + ".matrix", matrix_ok(got.data(), reference(16, 16, 16, 1.0, a_pattern,
                                                                 b_pattern), &detail),
               detail);
+        if (!o.dump_matrix.empty()) {
+            std::vector<double> A(256), B(256);
+            for (int m = 0; m < 16; ++m) {
+                for (int k = 0; k < 16; ++k) { A[std::size_t(m) * 16 + k] = a_pattern(m, k); }
+            }
+            for (int k = 0; k < 16; ++k) {
+                for (int n = 0; n < 16; ++n) { B[std::size_t(k) * 16 + n] = b_pattern(k, n); }
+            }
+            std::vector<std::uint32_t> words(256);
+            static_assert(sizeof(float) == sizeof(std::uint32_t));
+            std::memcpy(words.data(), got.data(), 256 * sizeof(float));
+            dump_matrix_file(o.dump_matrix, fmt, "cuda", A, B, words);
+        }
 
         float* out = nullptr;
         EL_CUDA(cudaMalloc(&out, warps * kChains * 256 * sizeof(float)));
@@ -576,6 +620,22 @@ int main(int argc, char** argv) {
                                       [](int k, int n) { return float(int(b_pattern(k, n) * 2) - 2); }),
                             &detail),
               detail);
+        if (!o.dump_matrix.empty()) {
+            std::vector<double> A(256), B(256);
+            for (int m = 0; m < 16; ++m) {
+                for (int k = 0; k < 16; ++k) {
+                    A[std::size_t(m) * 16 + k] = int(a_pattern(m, k) * 2) - 3;
+                }
+            }
+            for (int k = 0; k < 16; ++k) {
+                for (int n = 0; n < 16; ++n) {
+                    B[std::size_t(k) * 16 + n] = int(b_pattern(k, n) * 2) - 2;
+                }
+            }
+            std::vector<std::uint32_t> words(256);
+            std::memcpy(words.data(), got.data(), 256 * sizeof(int));
+            dump_matrix_file(o.dump_matrix, fmt, "cuda", A, B, words);
+        }
 
         int* out = nullptr;
         EL_CUDA(cudaMalloc(&out, warps * kChains * 256 * sizeof(int)));

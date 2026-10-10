@@ -5,6 +5,6 @@ Generated from run directories (`./echolock platforms`); the newest run of each
 
 | Platform | clock clock drop | clock declared/derived | constants source agreement | file_page status | memory copy h2d | memory device read | mma bf16 | mma fp16 | mma fp4 | mma fp8 | mma int8 | mma status | mma tf32 | pointer_chase L1 hop seq | pointer_chase random worst | sync return lag |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| NVIDIA GeForce RTX 5090 [cuda] | 1.00 x | 0.87 x | — | ok | 57.5 GB/s | 770.6 GB/s | 256.5 TFLOPS | 256.7 TFLOPS | 513.5 TFLOPS | 513.5 TFLOPS | 512.9 TFLOPS | — | 64.2 TFLOPS | 15.9 ns/hop | 65.9 ns/hop | — |
+| NVIDIA GeForce RTX 5090 [cuda] | 1.00 x | 0.87 x | — | ok | 57.5 GB/s | 770.6 GB/s | 256.6 TFLOPS | 256.7 TFLOPS | 513.4 TFLOPS | 513.4 TFLOPS | 513.0 TFLOPS | — | 64.2 TFLOPS | 15.9 ns/hop | 65.9 ns/hop | — |
 | NVIDIA GeForce RTX 5090 [host] | — | — | 1/1 checks | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | NVIDIA GeForce RTX 5090 [vulkan] | — | — | — | — | 19.6 GB/s | 719.0 GB/s | — | — | — | — | — | ok | — | 19.3 ns/hop | — | — |

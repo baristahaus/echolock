@@ -146,6 +146,31 @@ def cmd_grid(args: argparse.Namespace) -> int:
     return 0
 
 
+def compare_dumps(a_path: Path, b_path: Path, lines: list[str]) -> str:
+    """Compares the mma dump files of two backends: operand matrices must be identical, result
+    words bit-exact. Only formats both backends dumped can be compared."""
+    import json
+    out: list[str] = []
+    verdicts: list[str] = []
+    for tag in ("fp16", "int8"):
+        fa, fb = Path(f"{a_path}.{tag}.json"), Path(f"{b_path}.{tag}.json")
+        if not fa.exists() or not fb.exists():
+            out.append(f"- {tag}: not dumped by both backends (one may not implement the shape)")
+            continue
+        da, db = json.loads(fa.read_text()), json.loads(fb.read_text())
+        operands = da["A"] == db["A"] and da["B"] == db["B"]
+        diffs = sum(x != y for x, y in zip(da["D"], db["D"]))
+        ok = operands and diffs == 0 and len(da["D"]) == len(db["D"])
+        verdicts.append("ok" if ok else "MISMATCH")
+        out.append(f"- {tag}: operands {'identical' if operands else 'DIFFER'}, "
+                   f"{diffs}/{len(da['D'])} result words differ -> "
+                   f"{'bit-exact' if ok else 'NOT bit-exact'}")
+    lines += out or ["- no dump files found"]
+    if not verdicts:
+        return "nothing compared"
+    return "all matching" if all(v == "ok" for v in verdicts) else "MISMATCH"
+
+
 def cmd_crosscheck(args: argparse.Namespace) -> int:
     """Phase 1 of docs/crosscheck.md: run the same probe on two backends of this GPU and put the
     run directories side by side in one report. Each run keeps its own oracle verdict; reading
@@ -170,6 +195,12 @@ def cmd_crosscheck(args: argparse.Namespace) -> int:
                            evict_file=args.evict_file)
     per_backend = {args.backend_a: plan_opts(args.a_args.split() if args.a_args else []),
                    args.backend_b: plan_opts(args.b_args.split() if args.b_args else [])}
+    # Bit-exact mma comparison: both probes dump operand and result matrices; the comparison runs
+    # once both probes are done (the "Bit-exact" section of the report).
+    dump = [Path(args.out) / f"bitexact-{b}.dump" for b in backends] if args.bitexact else []
+    if dump:
+        for b, path in zip(backends, dump):
+            per_backend[b].extra += ["--dump-matrix", str(path)]
     dirs: list[Path] = []
     try:
         for b in backends:
@@ -205,6 +236,16 @@ def cmd_crosscheck(args: argparse.Namespace) -> int:
         print(f"[echolock] WARNING: the two runs used different devices: "
               + "; ".join(f"{b} -> {n}" for b, n in names.items())
               + " -- point both backends at the same GPU (see --a-args/--b-args)", file=sys.stderr)
+    if dump:
+        lines = ["## Bit-exact", "",
+                 "Same operands, same arithmetic, two independent implementations: every result "
+                 "word must match bit for bit.", ""]
+        verdict = compare_dumps(dump[0], dump[1], lines)
+        with open(opts.out_root / "crosscheck-report.md", "a") as f:
+            f.write("\n" + "\n".join(lines) + "\n")
+        print(f"[echolock] bit-exact: {verdict}", file=sys.stderr)
+        if verdict != "all matching":
+            return 1
     print(opts.out_root / "crosscheck-report.md")
     return 0
 
@@ -288,6 +329,8 @@ def main() -> int:
     rep.add_argument("--pin-cpus", default="")
     rep.add_argument("--a-args", help="probe arguments for backend A, quoted")
     rep.add_argument("--b-args", help="probe arguments for backend B, quoted")
+    rep.add_argument("--bitexact", action="store_true",
+                     help="mma: dump operands/results on both backends and require bit equality")
     rep.set_defaults(fn=cmd_crosscheck)
 
     pl = sub.add_parser("platforms", help="platforms.md: one row per GPU/backend from run dirs")
