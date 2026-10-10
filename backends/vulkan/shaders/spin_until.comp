@@ -1,0 +1,26 @@
+#version 460
+// spin_until (Vulkan): the invocation spins on the device shader clock until start + ticks have
+// passed and records the device-clock stamps it saw. The stamp slot carries the dispatch nonce,
+// so an unwritten dispatch cannot pass. Note: on AMD/RADV the GLSL shader clock is not a
+// real-time nanosecond clock; its rate is derived by the clock probe.
+#extension GL_ARB_shader_clock : require
+layout(local_size_x = 64) in;
+layout(std430, binding = 1) writeonly buffer Out { uvec2 stamps[]; };
+layout(push_constant) uniform P { uint ticks_lo; uint ticks_hi; uint nonce; uint pad; } p;
+
+void main() {
+    const uvec2 t0 = clock2x32ARB();
+    // deadline = t0 + (ticks_hi:ticks_lo), 64-bit with carry
+    const uint lo = t0.x + p.ticks_lo;
+    const uint hi = t0.y + p.ticks_hi + (lo < t0.x ? 1u : 0u);
+    uvec2 t = t0;
+    while (true) {
+        t = clock2x32ARB();
+        if (t.y > hi || (t.y == hi && t.x >= lo)) { break; }
+    }
+    if (gl_GlobalInvocationID.x == 0u) {
+        stamps[0] = t0;
+        stamps[1] = t;
+        stamps[2] = uvec2(p.nonce, 0x45594C4Bu);
+    }
+}

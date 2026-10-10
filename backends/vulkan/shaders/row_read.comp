@@ -1,0 +1,26 @@
+#version 460
+// row_read (Vulkan): each invocation XORs one row of the imported host buffer and stores the
+// row's XOR folded with the dispatch nonce, so the host can verify every row was actually read.
+// Two modes from the push constant: mode 0 = one row per invocation; mode 1 = one invocation
+// folds the whole buffer sequentially (the cold-pass read pattern).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Data { uint data[]; };
+layout(std430, binding = 1) writeonly buffer Out { uint out_data[]; };
+layout(push_constant) uniform P { uint words_per_row; uint nonce; uint mode; uint pad; } p;
+
+void main() {
+    const uint gid = gl_GlobalInvocationID.x;
+    if (p.mode == 0u) {
+        const uint base = gid * p.words_per_row;
+        uint x = 0u;
+        for (uint w = 0u; w < p.words_per_row; ++w) { x ^= data[base + w]; }
+        out_data[gid] = x ^ p.nonce;
+        return;
+    }
+    // sequential fold: invocation 0 walks the whole buffer; others exit
+    if (gid == 0u) {
+        uint x = 0u;
+        for (uint w = 0u; w < p.words_per_row; ++w) { x ^= data[w]; }
+        out_data[0] = x ^ p.nonce;
+    }
+}

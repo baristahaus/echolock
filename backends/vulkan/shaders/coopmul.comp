@@ -1,0 +1,68 @@
+#version 460
+// AMD tensor-core matrix multiply through VK_KHR_cooperative_matrix: the RDNA WMMA path, same
+// shape (M16 N16 K16, subgroup scope) and the same oracle rules as the CUDA mma probe. The
+// result slot carries the dispatch nonce, so a dispatch that never ran cannot pass.
+//
+// Two modes from the push constant: iters == 0 runs one MulAdd and stores the 16x16 result (the
+// numeric oracle); iters > 0 runs kChains independent accumulator chains for `iters` iterations
+// (the throughput series) and stores every chain's result.
+//
+// FORMAT_FP16 / FORMAT_BF16 / FORMAT_INT8 select the operand types at compile time (-D).
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#if defined(FORMAT_FP16)
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define COMP_T float16_t
+#define ACC_T float
+#elif defined(FORMAT_BF16)
+#extension GL_EXT_bfloat16 : require
+#define COMP_T bfloat16_t
+#define ACC_T float
+#elif defined(FORMAT_INT8)
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#define COMP_T int8_t
+#define ACC_T int
+#else
+#error "compile with -DFORMAT_FP16, -DFORMAT_BF16 or -DFORMAT_INT8"
+#endif
+
+layout(local_size_x = 64) in; // one AMD wave64 subgroup; the probe scales FLOPs by the
+                              // device's actual subgroup size
+layout(std430, binding = 0) readonly buffer A { COMP_T a_data[]; };
+layout(std430, binding = 1) readonly buffer B { COMP_T b_data[]; };
+layout(std430, binding = 2) writeonly buffer C { ACC_T c_data[]; };
+layout(std430, binding = 3) buffer Slot { uint slot; };
+layout(push_constant) uniform P { uint iters; uint nonce; } p;
+
+const int kChains = 8;
+
+void main() {
+    coopmat<COMP_T, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a;
+    coopmat<COMP_T, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b;
+    coopMatLoad(a, a_data, 0, 16, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatLoad(b, b_data, 0, 16, gl_CooperativeMatrixLayoutColumnMajor);
+    if (p.iters == 0u) {
+        coopmat<ACC_T, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> c =
+            coopmat<ACC_T, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(ACC_T(0));
+        // coopMatMulAdd RETURNS the new accumulator (it does not update c in place, unlike
+        // CUDA's mma_sync); discarding the return value is the bug that silently stores zeros.
+        c = coopMatMulAdd(a, b, c);
+        coopMatStore(c, c_data, 0, 16, gl_CooperativeMatrixLayoutRowMajor);
+        if (gl_GlobalInvocationID == uvec3(0u)) { atomicXor(slot, p.nonce); }
+        return;
+    }
+    coopmat<ACC_T, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> c[kChains];
+    for (int j = 0; j < kChains; ++j) {
+        c[j] = coopmat<ACC_T, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(ACC_T(0));
+    }
+    for (uint it = 0u; it < p.iters; ++it) {
+        for (int j = 0; j < kChains; ++j) { c[j] = coopMatMulAdd(a, b, c[j]); }
+    }
+    // Every chain of every workgroup is stored at its own offset and checked on the host, like
+    // the CUDA probe does.
+    for (int j = 0; j < kChains; ++j) {
+        coopMatStore(c[j], c_data, (gl_WorkGroupID.x * uint(kChains) + uint(j)) * 256u, 16,
+                     gl_CooperativeMatrixLayoutRowMajor);
+    }
+    if (gl_GlobalInvocationID == uvec3(0u)) { atomicXor(slot, p.nonce); }
+}

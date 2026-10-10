@@ -1,0 +1,25 @@
+#version 460
+// clock_dual (Vulkan): stamps the GLSL shader clock around a fixed amount of dependent-FMA
+// work. The work is not clock-bounded, so the stamp difference measures the shader clock's own
+// rate over the interval; the real-nanosecond reference comes from the timestamp queries that
+// bracket the kernel on the host side. On AMD/RADV this clock is the shader/core clock (its
+// rate moves with DVFS), not a real-time clock: there is no GLSL-accessible nanosecond
+// real-time clock on this stack, unlike CUDA's %globaltimer.
+#extension GL_ARB_shader_clock : require
+layout(local_size_x = 64) in;
+layout(std430, binding = 1) writeonly buffer Out { uvec2 stamps[]; };
+layout(push_constant) uniform P { uint iters; uint nonce; } p;
+
+void main() {
+    const uvec2 t0 = clock2x32ARB();
+    float acc = float(gl_GlobalInvocationID.x) * 1e-9f + 1.0f;
+    for (uint i = 0u; i < p.iters; ++i) { acc = acc * 1.0000001f + 5e-8f; }
+    const uvec2 t1 = clock2x32ARB();
+    if (gl_GlobalInvocationID.x == 0u) {
+        stamps[0] = t0;
+        stamps[1] = t1;
+        stamps[2] = uvec2(p.nonce, 0x45594C4Bu);
+    }
+    // keep the dependent chain alive against dead-code elimination
+    if (acc == 424242.0f) { stamps[3] = uvec2(1u, 0u); }
+}
