@@ -78,6 +78,7 @@ run/                      plans.py (probe → process steps), runner.py (steps +
 report/                   markdown.py: declared vs measured, one column per run label
 docs/                     brief.md (design), record-format.md (JSONL schema), amd.md (AMD enablement),
                           lessons.md (debugging lessons), crosscheck.md (cross-platform plan),
+                          review-request.md (for agent reviewers),
                           gb10-first-run.md (first GB10/GB10-OS run: outcomes, findings, caveats)
 tests/                    python3 -m unittest discover -s tests -t .
 ```
