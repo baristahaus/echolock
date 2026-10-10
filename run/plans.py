@@ -48,7 +48,7 @@ BACKENDS = ("cuda", "vulkan")
 # What each backend implements; make_plan validates the pair, so the CLI can list the union.
 PROBES_BY_BACKEND = {
     "cuda": ("memory", "file_page", "sync", "clock", "pointer_chase", "mma"),
-    "vulkan": ("memory",),
+    "vulkan": ("memory", "pointer_chase"),
 }
 
 

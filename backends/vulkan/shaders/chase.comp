@@ -1,0 +1,30 @@
+#version 450
+// Dependent-load chain chase: one invocation walks a chain of next-indices, so every load
+// depends on the previous one and nothing can be prefetched past it. The visited nodes fold
+// into `result`, and the dispatch's nonce folds once, so an unwritten slot cannot match the
+// expectation.
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) readonly buffer Chain {
+    uint chain[];
+};
+
+layout(std430, binding = 1) buffer Out {
+    uint result;
+};
+
+layout(push_constant) uniform Params {
+    uint hops;
+    uint nonce;
+} p;
+
+void main() {
+    uint i = 0u;
+    uint acc = 0u;
+    for (uint h = 0u; h < p.hops; ++h) {
+        i = chain[i]; // the dependent load
+        acc ^= i;
+    }
+    atomicXor(result, acc);
+    atomicXor(result, p.nonce);
+}

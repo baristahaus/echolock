@@ -11,9 +11,9 @@ CXX     ?= g++
 GLSLC   ?= glslc
 OUT     ?= ../../build/vulkan
 FLAGS   ?= -O2 -std=c++17 -Wall -Wextra
-PROBES  := memory
+PROBES  := memory pointer_chase
 
-SHADERS := read_fold
+SHADERS := read_fold chase
 
 all: $(addprefix $(OUT)/,$(PROBES))
 
@@ -24,6 +24,10 @@ $(OUT)/%.spv: shaders/%.comp
 $(OUT)/memory: memory.cpp common/echolock_vk.h $(OUT)/read_fold.spv
 	@mkdir -p $(OUT)
 	$(CXX) $(FLAGS) -I include -I . memory.cpp -lvulkan -o $@
+
+$(OUT)/pointer_chase: pointer_chase.cpp common/echolock_vk.h $(OUT)/chase.spv
+	@mkdir -p $(OUT)
+	$(CXX) $(FLAGS) -I include -I . pointer_chase.cpp -lvulkan -o $@
 
 clean:
 	rm -f $(addprefix $(OUT)/,$(PROBES)) $(addsuffix .spv,$(addprefix $(OUT)/,$(SHADERS)))

@@ -17,7 +17,7 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 | 2. Port memory, file_page, sync with JSONL output | done (compiles for sm_121a; not yet run on GB10) |
 | 3. Derived SM clock, pointer-chase latency map, per-format MMA throughput | done (compiles for sm_121a incl. fp4; not yet run on GB10) |
 | 4. Load generators and grid runner | done; loads measured + tested on this box, GPU load compiles (needs GB10 to run) ([load/](load/README.md)) |
-| 5. Vulkan backend | memory probe done; runs on AMD via RADV (first verified AMD GPU measurements); latency/sync probes pending ([backends/vulkan/](backends/vulkan/README.md)) |
+| 5. Vulkan backend | memory + pointer_chase done; both run on AMD via RADV with verified results; sync probe pending ([backends/vulkan/](backends/vulkan/README.md)) |
 | AMD: environment, kernel log, docs | done on amdgpu hardware; probes still CUDA-only ([docs/amd.md](docs/amd.md)) |
 
 ## Quick start (on the GPU machine)
@@ -30,7 +30,8 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 ./echolock run clock                  # derived SM clock, idle and under a memory load
 ./echolock run pointer_chase --scratch-dir /path/on/nvme
 ./echolock run mma                    # fp16/bf16/tf32/int8/fp8/fp4 tensor throughput
-./echolock run memory --backend vulkan  # same probe through RADV (AMD) or any Vulkan driver
+./echolock run memory --backend vulkan    # bandwidth/copies/contention via RADV (AMD)
+./echolock run pointer_chase --backend vulkan  # GPU memory latency map
 ./echolock grid memory --conditions idle,cpu50,mem80   # one run per load condition
 ./echolock run memory -- --gib 2 --seconds 1          # after --: arguments for the probe
 ./echolock report runs/A runs/B       # several runs side by side (e.g. idle vs loaded)

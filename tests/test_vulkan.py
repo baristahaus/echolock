@@ -51,5 +51,34 @@ class VulkanMemoryTest(unittest.TestCase):
         self.assertTrue({"gpu_read", "copy_payload", "cpu_read"} <= names)
 
 
+CHASE = ROOT / "build" / "vulkan" / "pointer_chase"
+CHASE_SHADER = ROOT / "build" / "vulkan" / "chase.spv"
+
+
+@unittest.skipUnless(CHASE.exists() and CHASE_SHADER.exists(),
+                     "build/vulkan/pointer_chase not built")
+@unittest.skipUnless(vulkan_device_present(), "no Vulkan ICD present")
+class VulkanPointerChaseTest(unittest.TestCase):
+    def test_latency_map_contract(self):
+        p = subprocess.run([str(CHASE), "--footprints", "0.0625,1", "--hops", "256",
+                            "--reps", "2", "--kinds", "device", "--patterns", "seq",
+                            "--device", "0"],
+                           capture_output=True, text=True, timeout=120)
+        recs = [json.loads(l) for l in p.stdout.splitlines()]
+        if any(r["type"] == "error" for r in recs):
+            self.skipTest(f"no runnable Vulkan device: {recs[0].get('message')}")
+        self.assertEqual(p.returncode, 0, p.stderr[-500:])
+        end = recs[-1]
+        self.assertEqual((end["type"], end["status"]), ("probe_end", "ok"))
+        checks = [r for r in recs if r["type"] == "check"]
+        self.assertTrue(checks and all(c["pass"] for c in checks))
+        summaries = [r for r in recs if r["type"] == "measure" and "per_rep" in r.get("tags", {})]
+        self.assertTrue(summaries)
+        self.assertTrue(all(r.get("verified") for r in summaries))
+        for r in summaries:
+            self.assertGreater(r["value"], 0.0)
+            self.assertLess(r["value"], 100000.0)  # a hop latency, sanity band
+
+
 if __name__ == "__main__":
     unittest.main()

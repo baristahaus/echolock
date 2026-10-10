@@ -108,16 +108,20 @@ measurement would never notice this; a CPU/GPU shared one cannot avoid it.
 `./echolock run memory --backend vulkan` is the way to run it. The rest of the original plan,
 for what Vulkan has not covered yet:
 
-1. **Completion latency**: `vkQueueSubmit` + `vkWaitForFences`, the direct analogue of the sync
-   probe; a pointer-chase compute shader for the latency map (file-backed pages have no Vulkan
-   equivalent, so the cold-fault measurement stays CUDA-side on GB10).
-2. **Derived clock (principle 3)**: AMD GPUs have `s_get_breg_b32` for the shader clock counters
+1. **Latency map**: done -- `backends/vulkan/pointer_chase.cpp`, dependent-load chains in a
+   compute shader through device-local and host-visible memory. First verified numbers on the
+   RX 9070 XT: VRAM DRAM hops ~254 ns, host-RAM hops over PCIe ~780-835 ns, small host-visible
+   footprints reaching the CPU's L3 (~112 ns). File-backed pages have no Vulkan equivalent, so
+   the cold-fault measurement stays CUDA-side on GB10.
+2. **Completion latency**: `vkQueueSubmit` + `vkWaitForFences`, the direct analogue of the sync
+   probe. Not yet implemented.
+3. **Derived clock (principle 3)**: AMD GPUs have `s_get_breg_b32` for the shader clock counters
    and `s_memrealtime` for a nanosecond timestamp. Both are in the machine-readable ISA — read it,
    don't repeat folklore, and check the result against `pp_dpm_sclk` the same way the environment
    layer now checks `gpu_metrics`.
-3. **KFD directly** (`/dev/kfd` ioctls via rocm-thunk headers) if a probe needs
+4. **KFD directly** (`/dev/kfd` ioctls via rocm-thunk headers) if a probe needs
    instruction-level control Vulkan will not give, e.g. the pointer-chase latency map.
-4. **A HIP/ROCr port** only if a question is left open that Vulkan cannot answer; it is the
+5. **A HIP/ROCr port** only if a question is left open that Vulkan cannot answer; it is the
    heaviest dependency of the five.
 
 ## Sources
