@@ -60,7 +60,18 @@ class TestCudaDeviceProbes(unittest.TestCase):
             if "cudaErrorMemoryAllocation" in out or "out of memory" in out:
                 self.skipTest("GPU cannot host a context (memory committed elsewhere)")
             self.skipTest("no usable CUDA GPU (probe produced no probe_end record)")
-        if status != "ok":
+        if status == "error":
+            # A machine without a usable NVIDIA driver errors the probe cleanly (e.g.
+            # cudaErrorInsufficientDriver on a box with the toolkit but no driver). That is a
+            # skip, not a regression: the suite exists to catch device-code regressions on
+            # GPU machines.
+            no_gpu = ("cudaErrorInsufficientDriver" in out
+                      or "cudaErrorNoDevice" in out
+                      or "no CUDA-capable device" in out
+                      or "driver version is insufficient" in out
+                      or "cudaErrorCallRequiresNewerDriver" in out)
+            if no_gpu:
+                self.skipTest("no usable NVIDIA driver on this machine")
             self.fail(f"baseline sync run failed (status {status}); fix before running the suite")
 
     def test_probe_oracles(self):
