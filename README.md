@@ -18,7 +18,7 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 | 3. Derived SM clock, pointer-chase latency map, per-format MMA throughput | done (compiles for sm_121a incl. fp4; not yet run on GB10) |
 | 4. Load generators and grid runner | done; loads measured + tested on this box, GPU load compiles (needs GB10 to run) ([load/](load/README.md)) |
 | 5. Vulkan backend | memory + pointer_chase done; both run on AMD via RADV with verified results; sync probe pending ([backends/vulkan/](backends/vulkan/README.md)) |
-| AMD: environment, kernel log, docs | done on amdgpu hardware; probes still CUDA-only ([docs/amd.md](docs/amd.md)) |
+| AMD: environment, kernel log, docs | done on amdgpu hardware; memory + pointer_chase probes run on AMD via RADV ([docs/amd.md](docs/amd.md)) |
 
 ## Quick start (on the GPU machine)
 
