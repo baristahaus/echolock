@@ -22,8 +22,22 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from env.sampler import meminfo
 from run.plans import Plan, PlanOptions, make_plan
 from run.runner import Run, RunOptions, new_run_id
+
+
+def load_jsonl(path: Path) -> list[dict]:
+    out = []
+    if path.exists():
+        for line in path.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict):
+                out.append(rec)
+    return out
 
 ROOT = Path(__file__).resolve().parents[1]
 LOADS = ROOT / "load"
@@ -111,6 +125,71 @@ class LoadProcess:
         self._thread.join(timeout=5)
 
 
+def load_check(condition: str, run_dir: Path) -> dict | None:
+    """Load-condition invariance (docs/crosscheck.md, later candidates): the requested level and
+    the generator's own achieved record must agree, and the sampler must show at least the target
+    (it also sees the probe's own work, so it bounds the ambient load from below only). Woven
+    into the manifest so the report can flag a run whose load was not what its label says. pass
+    is None when nothing is determinable; only determinable failures fail."""
+    if condition == "idle":
+        return None
+    m = re.fullmatch(r"(cpu|mem|io|gpu)(\d+(?:\.\d+)?)", condition)
+    kind, target = m.group(1), float(m.group(2))
+    target = target / 100.0 if kind in ("cpu", "mem", "gpu") else target
+    heartbeats = []
+    lp = run_dir / "load.jsonl"
+    if lp.exists():
+        for line in lp.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("type") == "heartbeat":
+                heartbeats.append(rec.get("achieved") or {})
+    self_reported: float | None = None
+    if heartbeats:
+        key = {"cpu": "duty", "gpu": "duty", "io": "mbps", "mem": "resident_bytes"}.get(kind)
+        vals = [h.get(key) for h in heartbeats if h.get(key) is not None]
+        if vals:
+            self_reported = sum(vals) / len(vals)
+            if kind == "mem":
+                total = (meminfo().get("MemTotal_kib") or 0) * 1024
+                self_reported = self_reported / total if total else None
+    # The sampler's independent view of the same load.
+    sampler: float | None = None
+    samples = load_jsonl(run_dir / "samples.jsonl")
+    if kind == "cpu":
+        vals = [s.get("host", {}).get("cpu_busy_frac") for s in samples]
+        vals = [v for v in vals if v is not None]
+        sampler = sum(vals) / len(vals) if vals else None
+    elif kind == "gpu":
+        vals = [g.get("util_gpu_pct") for s in samples for g in (s.get("gpu") or [])
+                if isinstance(g.get("util_gpu_pct"), (int, float))]
+        sampler = sum(vals) / len(vals) / 100.0 if vals else None
+    elif kind == "mem":
+        mem = [s.get("host", {}).get("mem") or {} for s in samples]
+        avail = [m_.get("MemAvailable_kib") for m_ in mem if m_.get("MemAvailable_kib")]
+        total = [m_.get("MemTotal_kib") for m_ in mem if m_.get("MemTotal_kib")]
+        if avail and total and total[0]:
+            sampler = 1.0 - min(avail) / total[0]
+    def agrees(delivered: float | None) -> bool | None:
+        if delivered is None:
+            return None
+        return abs(delivered - target) <= max(0.15 * target, 0.05)
+
+    def at_least(delivered: float | None) -> bool | None:
+        # The sampler sees the ambient load PLUS the probe's own work, so it can only confirm the
+        # load existed (at least the target), never that it stopped exactly at the target.
+        if delivered is None:
+            return None
+        return delivered >= target * 0.85
+    checks = {"self_reported": agrees(self_reported), "sampler_at_least": at_least(sampler)}
+    determinable = [v for v in checks.values() if v is not None]
+    return {"requested": target, "self_reported": self_reported, "sampler": sampler,
+            "pass": all(determinable) if determinable else None,
+            "checks": checks}
+
+
 def run_condition(condition: str, plan: Plan, opts: GridOptions,
                   run_id: str | None = None) -> Path:
     """One probe run under one load condition. The load starts, reports ready, the probe runs,
@@ -146,6 +225,11 @@ def run_condition(condition: str, plan: Plan, opts: GridOptions,
                     f.write(json.dumps({"v": 1, "t_ns": time.monotonic_ns(), "src": "load",
                                         "type": "load_error",
                                         "message": "load never reported ready"}) + "\n")
+        mp = run.dir / "manifest.json"
+        if mp.exists():
+            manifest = json.loads(mp.read_text())
+            manifest["load_check"] = load_check(condition, run.dir)
+            mp.write_text(json.dumps(manifest, indent=1) + "\n")
     return run.dir
 
 

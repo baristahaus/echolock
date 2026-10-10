@@ -71,12 +71,28 @@ directories, so the verdict is data the report can render.
 ## Status
 
 - [x] Phase 1: cross-backend report columns; `crosscheck` mode (per-backend args via
-  `--a-args`/`--b-args`; warns when the two runs declared different devices). Row alignment
-  across backends stays open until Phase 3 defines the tag mapping.
+  `--a-args`/`--b-args`; warns when the two runs declared different devices).
 - [x] Phase 2: constants probe (host backend; NVML / nvidia-smi / proc-information / amdgpu
   sysfs / KFD / vulkaninfo sources compared per device fact).
-- [ ] Phase 3: equivalence tolerances; bit-exact mma check.
-  Finding: the Vulkan mma and sync probes fail on NVIDIA (vkCreateDevice ->
-  EXTENSION_NOT_PRESENT; query results -> DEVICE_LOST) — they were verified only on AMD/RADV.
-  Cross-stack tolerance checks land for memory and pointer_chase, which work on both.
-- [ ] Phase 4: docs/platforms.md
+- [x] Phase 3: cross-stack alignment (tag + metric-name alias map, canonical sync form) with
+  tolerance verdicts; bit-exact mma: fp16 is BIT-EXACT across CUDA WMMA and Vulkan
+  cooperative-matrix on the RTX 5090 (`crosscheck --bitexact`). int8 bit-exact is impossible on
+  this GPU: NVIDIA's cooperative matrix lists no M16N16K16 int8 config (AMD's does) — itself a
+  platform finding. The bit-exact run also exposed and fixed an oracle limit: past ~262k
+  iterations want*iters exceeds the fp32 exact-integer range, so the exact throughput check
+  would fail on rounding; iteration counts are now capped in both backends. (Earlier note: the
+  "Vulkan mma/sync fail on NVIDIA" finding was device selection — the Vulkan probes defaulted
+  to the RADV iGPU on this hybrid machine; they now take --device and pass on the 5090.)
+- [x] Phase 4: `./echolock platforms` -> docs/platforms.md, regenerated from run directories.
+- [x] Load-condition invariance: every grid condition run records a `load_check` in the manifest
+  (requested vs the generator's self-reported achieved, plus a sampler view that must show at
+  least the target); the report flags a run whose load was not what its label says. The check
+  caught two real issues on its first version: loadavg cannot validate a 10 s run (the sampler
+  now derives a per-sample cpu_busy_frac from /proc/stat deltas), and the sampler's view
+  includes the probe's own work, so it bounds the ambient load from below only.
+
+## Next (the one candidate left)
+
+- File-backed GPU reads: NVIDIA CUDA can import file-backed host memory; AMD Vulkan cannot
+  (backends/vulkan/README.md). One workload, two genuinely different mechanisms. Needs a spec
+  (probes/file_read/spec.md) and a CUDA implementation; the residency model is file_page's.
