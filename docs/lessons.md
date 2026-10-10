@@ -91,3 +91,12 @@ container, two padding bits below and above. Two independent layout guesses (2 v
 low nibble) both produced negative sums that looked like fragment mis-mapping. Also: `-arch=sm_120a`
 silently drops the family suffix just like sm_121a does — always use explicit
 `-gencode arch=compute_120a,code=sm_120a`.
+
+## 8. Control-test the rejection before designing around it (2026-10, file-backed GPU reads)
+
+The file-backed GPU-read probe died at `cudaHostRegister` -> cudaErrorInvalidArgument on
+file-backed mmap pages. One control test (anonymous malloc, anonymous mmap) showed registration
+itself works and the rejection is specific to file-backed pages -- a driver limitation, not a
+probe bug, and not something to design around until it is re-tested on other drivers. Also: a
+segfaulting feasibility test had an unbuffered-diagnosis detour worth keeping -- printf to a
+crashed process loses buffered output, so feasibility scaffolds should `vdprintf(2, ...)`.
