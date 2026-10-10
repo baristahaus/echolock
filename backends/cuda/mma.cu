@@ -3,13 +3,16 @@
 //
 // WMMA formats (fp16, bf16, tf32, int8) load operands from global memory through the WMMA API, so
 // their fragment layouts are handled by the compiler. fp8 e4m3 and fp4 e2m1 use hand-written PTX
-// whose fragment layouts follow the SM80 int8 m16n8k32 encoding (fp4's k is counted in bytes, so
-// one MMA covers 64 fp4 values); every format's result is checked element-wise against a host
+// whose fragment layouts follow the PTX m16n8k32 encoding: four elements per .b32 register, and
+// for e2m1 one element per byte, the 4-bit value in the central four bits of the byte (PTX ISA
+// kind::f8f6f4 packing; verified on sm_120a hardware)
+// spec and on sm_120a hardware). Every format's result is checked element-wise against a host
 // reference computed in exact arithmetic, so a mis-encoded operand layout fails loudly instead of
 // posting a plausible throughput.
 //
-// fp4 needs the family-specific build target (compute_121a): with plain compute_121 the assembler
-// rejects kind::f8f6f4, and the probe reports fp4 as not built rather than guessing.
+// fp4 needs a family-specific build target (compute_120a/compute_121a, i.e. the 'a' targets):
+// kind::f8f6f4 is not in plain compute_120/121, and the probe reports fp4 as not built rather
+// than guessing. All Blackwell GPUs (sm_120a consumer, sm_121a GB10) have the fp4 MMA.
 
 #include "common/echolock.cuh"
 
@@ -133,10 +136,10 @@ __global__ void wmma_throughput_kernel(const ElemT* A, const ElemT* B, AccT* out
 
 // ---- PTX mma (bf16, fp8 e4m3, fp4 e2m1) ---------------------------------------------------------
 // WMMA covers fp16/tf32/int8; bf16, fp8 and fp4 go through hand-written PTX. Every fragment
-// layout below follows the SM80 encodings (verified against CUTLASS's hardware-validated
-// mma_traits): fp16/bf16 m16n8k16 and fp8/fp4 m16n8k32 share the same per-thread structure,
-// fp4 counting k in bytes so one MMA covers 64 fp4 values. Each format's full result matrix is
-// checked against an exact host reference, so a wrong layout fails loudly, never silently.
+// layout follows the PTX ISA m16n8k16/m16n8k32 encodings, verified element-wise on hardware:
+// fp16/bf16 m16n8k16 and fp8/fp4 m16n8k32 share the same per-thread register structure, with fp4
+// holding one e2m1 element per byte. Each format's full result matrix is checked against an exact
+// host reference, so a wrong layout fails loudly, never silently.
 
 __device__ __forceinline__ void mma_bf16(float* d, const unsigned* a, const unsigned* b,
                                          const float* c) {
@@ -158,7 +161,7 @@ __device__ __forceinline__ void mma_fp8(float* d, const unsigned* a, const unsig
 
 __device__ __forceinline__ void mma_fp4(float* d, const unsigned* a, const unsigned* b,
                                         const float* c) {
-#if defined(__CUDA_ARCH_SPECIFIC__) && __CUDA_ARCH_SPECIFIC__ >= 1210
+#if defined(__CUDA_ARCH_SPECIFIC__) && __CUDA_ARCH_SPECIFIC__ >= 1200
     asm volatile("mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e2m1.e2m1.f32 "
                  "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
                  : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
@@ -172,7 +175,7 @@ __device__ __forceinline__ void mma_fp4(float* d, const unsigned* a, const unsig
 
 // Set at compile time so the host knows whether the fp4 instruction exists in this binary.
 __device__ __constant__ int kFp4Built =
-#if defined(__CUDA_ARCH_SPECIFIC__) && __CUDA_ARCH_SPECIFIC__ >= 1210
+#if defined(__CUDA_ARCH_SPECIFIC__) && __CUDA_ARCH_SPECIFIC__ >= 1200
     1;
 #else
     0;
@@ -211,8 +214,10 @@ __device__ __forceinline__ unsigned bf16_pair2(__nv_bfloat16 lo, __nv_bfloat16 h
     return *reinterpret_cast<const unsigned*>(&v);
 }
 
-// fp8/fp4 fill (m16n8k32). A is 16 rows x 32 bytes (fp8: 32 values; fp4: 64 values, 2 per byte),
-// B is 32 rows x 8 bytes. Layout per the SM80 int8 m16n8k32 encoding:
+// fp8/fp4 fill (m16n8k32). A is 16 rows x 32 bytes, B is 32 rows x 8 bytes; one element per byte
+// for both (fp8 as e4m3; fp4 as an e2m1 element in the central four bits of the byte). Layout
+// per the PTX ISA
+// m16n8k32 encoding:
 //   a0 = A[g][kb 4t..+3]      a1 = A[g+8][kb 4t..+3]
 //   a2 = A[g][kb 4t+16..+19]  a3 = A[g+8][kb 4t+16..+19]
 //   b0 = B[kb 4t..+3][g]      b1 = B[kb 4t+16..+19][g]
@@ -610,12 +615,14 @@ int main(int argc, char** argv) {
             int built = 0;
             EL_CUDA(cudaMemcpyFromSymbol(&built, kFp4Built, sizeof(int)));
             if (!built) {
-                note("fp4 not built: compile with the compute_121a family target "
-                     "(make ARCH=sm_121a uses it); plain compute_121 has no kind::f8f6f4");
+                note("fp4 not built: compile with a family-specific target (make ARCH=sm_120a "
+                     "or sm_121a); plain compute_120/121 has no kind::f8f6f4");
                 return;
             }
         }
-        // A: 16 rows x 32 bytes; B: 32 rows x 8 bytes. fp8 packs 1 value/byte, fp4 packs 2.
+        // A: 16 rows x 32 bytes; B: 32 rows x 8 bytes. One element per byte for both formats: fp8
+        // as e4m3, fp4 as an e2m1 element in the central four bits of its byte (PTX m16n8k32,
+        // k = 32 elements; kind::f8f6f4 pads e2m1 with two bits below and two above).
         std::vector<unsigned char> A(16 * 32), B(32 * 8);
         for (int m = 0; m < 16; ++m) {
             for (int e = 0; e < k_elements; ++e) {
@@ -626,8 +633,7 @@ int main(int argc, char** argv) {
                 } else {
                     const unsigned char nib =
                         v == 0.0f ? 0u : v == 0.5f ? 1u : v == 1.0f ? 2u : v == 1.5f ? 3u : 4u;
-                    A[std::size_t(m) * 32 + e / 2] |=
-                        static_cast<unsigned char>(nib << ((e % 2) * 4)); // even element: low nibble
+                    A[std::size_t(m) * 32 + e] = static_cast<unsigned char>(nib << 2); // central 4 bits
                 }
             }
         }
@@ -640,8 +646,7 @@ int main(int argc, char** argv) {
                 } else {
                     const unsigned char nib =
                         v == 0.0f ? 0u : v == 0.5f ? 1u : v == 1.0f ? 2u : v == 1.5f ? 3u : 4u;
-                    // fp4 packs 2 values per byte along k: element e lives in byte e/2.
-                    B[(e / 2) * 8 + n] |= static_cast<unsigned char>(nib << ((e % 2) * 4));
+                    B[std::size_t(e) * 8 + n] = static_cast<unsigned char>(nib << 2); // central 4 bits
                 }
             }
         }
@@ -690,7 +695,7 @@ int main(int argc, char** argv) {
         const SeriesResult s = timed_series(
             stream, launch, verify, o.seconds,
             double(warps) * kChains * 2.0 * 16 * 8 * k_elements,
-            Obj().str("format", fmt).str("shape", fmt == "fp8" ? "m16n8k32" : "m16n8k64"),
+            Obj().str("format", fmt).str("shape", "m16n8k32"),
             "mma_throughput");
         tflops[fmt] = s.tflops;
         EL_CUDA(cudaFree(out));
@@ -700,7 +705,7 @@ int main(int argc, char** argv) {
     };
 
     if (wants(o, "fp8")) { run_ptx("fp8", 32); }
-    if (wants(o, "fp4")) { run_ptx("fp4", 64); }
+    if (wants(o, "fp4")) { run_ptx("fp4", 32); }
 
     // fp16-relative throughput per format: fp8 at half of fp16 reads as 2.0.
     if (tflops.count("fp16") && tflops["fp16"] > 0) {

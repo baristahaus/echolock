@@ -81,3 +81,13 @@ fill the later contention phase expected; the XOR oracle flagged it with the hos
 fingerprint, which pinpointed the overwrite immediately. Give each stimulus buffer one owner,
 or refill before reuse — and be suspicious when a failure's value matches another buffer's
 expected XOR exactly.
+
+## 7. Read the packing section of the PTX spec before guessing nibble layouts (2026-10, mma/CUDA fp4)
+
+The fp4 path failed on hardware twice before the spec was read end to end. The mma instruction
+pages say each .b32 register holds four e2m1 elements — but the packing note (under the
+kind::f8f6f4 description) says a 4-bit element lives in the *central* four bits of its 8-bit
+container, two padding bits below and above. Two independent layout guesses (2 values per byte;
+low nibble) both produced negative sums that looked like fragment mis-mapping. Also: `-arch=sm_120a`
+silently drops the family suffix just like sm_121a does — always use explicit
+`-gencode arch=compute_120a,code=sm_120a`.
