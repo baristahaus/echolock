@@ -52,7 +52,10 @@ need no `-lcuda` and no vendor libraries.
 **AMD GPUs** are supported for the environment side today: clocks, temperature, power, utilisation,
 VRAM and kernel-log resets come from the `amdgpu` driver's own sysfs files, with no ROCm, no AMD
 SMI and no other library. What is open on AMD's side and what an AMD probe backend would use is
-written up in [docs/amd.md](docs/amd.md). The probes themselves are still CUDA-only.
+written up in [docs/amd.md](docs/amd.md). The **memory** and **pointer_chase** probes also run
+on AMD through the Vulkan backend (RADV), so bandwidth, copies, contention and the latency map
+are measured on AMD hardware today; the probes that need CUDA (mma, file_page, sync, clock)
+are CUDA-only.
 
 ## Layout
 
