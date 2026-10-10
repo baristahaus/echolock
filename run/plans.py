@@ -61,6 +61,18 @@ def binary(backend: str, probe: str) -> Path:
     return BUILD / backend / probe
 
 
+def honours_pin_cpus(probe: str, backend: str) -> bool:
+    """True when this probe/backend pair actually pins a CPU, False when it would ignore the flag.
+
+    pin_cpus is used by one plan only: sync on CUDA, which adds taskset-wrapped blocking steps. It
+    used to be accepted everywhere and dropped in silence, so `run memory --pin-cpus 0` produced an
+    unpinned run, recorded nothing about the request, and read in the shell history as if it had
+    pinned. Refusing is the honest half of the fix; the manifest still will not show which CPUs a
+    sync run pinned beyond the step name (see docs/gb10-first-run.md).
+    """
+    return probe == "sync" and backend == "cuda"
+
+
 def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Plan:
     if backend not in BACKENDS:
         raise ValueError(f"backend {backend!r} not implemented (have: {', '.join(BACKENDS)})")

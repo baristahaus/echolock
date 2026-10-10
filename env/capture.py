@@ -75,6 +75,9 @@ def host() -> dict:
         idle_states.append({"name": read_text(f"{state}/name"),
                             "latency_us": read_text(f"{state}/latency"),
                             "disabled": read_text(f"{state}/disable")})
+    if model_name is None:
+        # Arm: no `model name` in cpuinfo, but the part numbers are already in per_cpu.
+        model_name = arm_cpu_model([c["part"] for c in per_cpu])
     return {
         "hostname": u.node,
         "kernel": u.release,
@@ -92,6 +95,44 @@ def host() -> dict:
         "overcommit_memory": read_text("/proc/sys/vm/overcommit_memory"),
         "dmesg_restrict": read_text("/proc/sys/kernel/dmesg_restrict"),
     }
+
+
+#/ Arm MIDR part numbers -> core names, enough to name the cores this project runs on. Used only
+# to summarise what is already captured per CPU (host.cpus[].part) into host.cpu_model, which
+# /proc/cpuinfo leaves absent on Arm: it has no `model name` line there. Two of these are verified
+# on hardware (0xd87/0xd85 on GB10, against lscpu); the rest are from Arm's TRM part-number tables
+# and are named only so a log reader is not left with a bare hex code. An unknown part keeps its
+# hex, because a wrong name is worse than a raw number.
+ARM_PART_NAMES = {
+    "0xd87": "Cortex-X925",   # verified on GB10 with lscpu
+    "0xd85": "Cortex-A725",   # verified on GB10 with lscpu
+    "0xd49": "Neoverse N2",
+    "0xd4f": "Neoverse V2",
+    "0xd0c": "Neoverse N1",
+    "0xd4d": "Cortex-A710",
+    "0xb45": "Cortex-A510",
+    "0xd0d": "Cortex-A77",
+    "0xd05": "Cortex-A55",
+}
+
+
+def arm_cpu_model(parts) -> str | None:
+    """Summarise Arm MIDR part numbers into one model string, e.g. 'Cortex-X925 x10 + Cortex-A725 x10'.
+
+    Returns None when there is nothing to name, so the caller leaves cpu_model unset rather than
+    inventing a name. Counts are kept because an asymmetric host (GB10: 10 X925 + 10 A725) reads
+    very differently from a symmetric one, and a single name would hide that.
+    """
+    counts: dict[str, int] = {}
+    for part in parts:
+        if not part or not part.strip():
+            continue
+        name = ARM_PART_NAMES.get(part.strip().lower()) or f"part {part.strip()}"
+        counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return None
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return " + ".join(f"{name} x{n}" if n > 1 else name for name, n in ordered)
 
 
 def firmware() -> dict:
