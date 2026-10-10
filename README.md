@@ -24,8 +24,10 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 ## Quick start (on the GPU machine)
 
 ```sh
-./echolock build                      # nvcc from PATH or /usr/local/cuda; ARCH defaults to sm_121a
+./echolock build                      # nvcc from PATH or /usr/local/cuda; ARCH defaults to sm_121a,
+                                      # or sm_120a automatically on a CC 12.0 GPU
 ./echolock run memory                 # -> runs/<utc>-memory-cuda-idle/ with report.md
+./echolock run sync --repeat 3        # three runs, one combined report (flakiness becomes visible)
 ./echolock run sync --pin-cpus 0,10   # also blocking-schedule runs pinned to CPU 0 and CPU 10
 ./echolock run file_page --scratch-dir /path/on/nvme --drop-caches
 ./echolock run clock                  # derived SM clock, idle and under a memory load

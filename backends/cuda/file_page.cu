@@ -23,6 +23,8 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -215,6 +217,14 @@ void phase_prep(const Options& o) {
                 }
             }
         }
+    }
+    // A tmpfs scratch would measure RAM, not storage; refuse rather than post a number that looks
+    // like disk behaviour. (The file itself may not exist yet, so statfs its parent directory.)
+    const std::string stat_dir = slash != std::string::npos && slash > 0 ? o.file.substr(0, slash) : std::string(".");
+    struct statfs st {};
+    if (statfs(stat_dir.c_str(), &st) == 0 && st.f_type == 0x01021994 /* TMPFS_MAGIC */) {
+        fail("scratch path " + o.file + " is on tmpfs; page-cache numbers would measure RAM, "
+             "not storage -- pass --scratch-dir on a real filesystem");
     }
     const int fd = open(o.file.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0) { fail("open scratch: " + std::string(std::strerror(errno))); }

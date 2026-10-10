@@ -18,8 +18,11 @@ jobs:
     # Compile check only: no GPU on hosted runners. Also runs the probes' GPU-free phases.
     runs-on: ubuntu-24.04
     container: nvidia/cuda:13.0.0-devel-ubuntu24.04
+    strategy:
+      matrix:
+        arch: [sm_121a, sm_120a, sm_90]  # GB10, consumer Blackwell, a pre-Blackwell control
     steps:
       - uses: actions/checkout@v4
       - run: apt-get update && apt-get install -y --no-install-recommends make python3
-      - run: make -C backends/cuda ARCH=sm_121a
+      - run: make -C backends/cuda ARCH=${{ matrix.arch }}
       - run: python3 -m unittest tests.test_cuda_host_phases -v

@@ -34,10 +34,27 @@ def aborted(run: Run, exc: BaseException) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
-    cmd = ["make", "-C", str(ROOT / "backends" / "cuda"), f"ARCH={args.arch}"]
+    arch = args.arch or detect_arch()
+    cmd = ["make", "-C", str(ROOT / "backends" / "cuda"), f"ARCH={arch}"]
     if args.nvcc:
         cmd.append(f"NVCC={args.nvcc}")
     return subprocess.call(cmd)
+
+
+def detect_arch() -> str:
+    """ARCH for this machine's GPU: the family-specific target when the GPU is Blackwell (fp4 MMA
+    needs the 'a' target), sm_121a (the GB10 default) when no GPU answers."""
+    try:
+        p = subprocess.run(["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                           capture_output=True, text=True, timeout=20)
+        cap = p.stdout.strip().splitlines()[0].strip() if p.returncode == 0 and p.stdout.strip() else ""
+    except (OSError, subprocess.TimeoutExpired):
+        cap = ""
+    if cap == "12.0":
+        print("[echolock] GPU compute capability 12.0: building sm_120a (pass --arch to override)",
+              file=sys.stderr)
+        return "sm_120a"
+    return "sm_121a"
 
 
 def cmd_env(_: argparse.Namespace) -> int:
@@ -74,24 +91,40 @@ def cmd_run(args: argparse.Namespace) -> int:
                             pin_cpus=[int(c) for c in args.pin_cpus.split(",") if c],
                             evict_file=args.evict_file)
     run = Run(make_plan(args.probe, args.backend, run_dir, plan_opts), opts, run_id)
-    print(f"[echolock] {run.run_id}: {len(run.plan.steps)} step(s)", file=sys.stderr)
-    try:
-        manifest = run.execute()
-    except (KeyboardInterrupt, RunInterrupted) as e:
-        return aborted(run, e)
-    for s in manifest["steps"]:
-        print(f"[echolock]   {s['name']}: {s['status']} (rc={s['returncode']}, "
-              f"{(s['end_ns'] - s['start_ns']) / 1e9:.1f} s, {s['failed_checks']} failed checks)",
+    dirs: list[Path] = []
+    manifests: list[dict] = []
+    for rep in range(max(1, args.repeat)):
+        if rep:
+            run_dir = opts.out_root / new_run_id(args.probe, args.backend, args.label)
+            run = Run(make_plan(args.probe, args.backend, run_dir, plan_opts), opts,
+                      run_dir.name)
+        print(f"[echolock] {run.run_id}: {len(run.plan.steps)} step(s)", file=sys.stderr)
+        try:
+            manifest = run.execute()
+        except (KeyboardInterrupt, RunInterrupted) as e:
+            if dirs and not args.no_report:
+                from report.markdown import render
+                report = dirs[0] / "report.md" if len(dirs) == 1 else opts.out_root / "report.md"
+                report.write_text(render(dirs))
+                print(report)
+            return aborted(run, e)
+        dirs.append(run.dir)
+        manifests.append(manifest)
+    for manifest in manifests:
+        for s in manifest["steps"]:
+            print(f"[echolock]   {s['name']}: {s['status']} (rc={s['returncode']}, "
+                  f"{(s['end_ns'] - s['start_ns']) / 1e9:.1f} s, {s['failed_checks']} failed checks)",
+                  file=sys.stderr)
+        kl = manifest["kernel_log"]
+        print(f"[echolock] status {manifest['status']}; kernel events during run: "
+              f"{kl['during_run'] or 'none'}{'' if kl['available'] else ' (log unavailable: ' + str(kl['error']) + ')'}",
               file=sys.stderr)
-    kl = manifest["kernel_log"]
-    print(f"[echolock] status {manifest['status']}; kernel events during run: "
-          f"{kl['during_run'] or 'none'}{'' if kl['available'] else ' (log unavailable: ' + str(kl['error']) + ')'}",
-          file=sys.stderr)
     if not args.no_report:
         from report.markdown import render
-        (run.dir / "report.md").write_text(render([run.dir]))
-    print(run.dir)
-    return 0 if manifest["status"] == "ok" else 1
+        report = dirs[0] / "report.md" if len(dirs) == 1 else opts.out_root / "report.md"
+        report.write_text(render(dirs))
+    print(dirs[0] if len(dirs) == 1 else opts.out_root)
+    return 0 if all(m["status"] == "ok" for m in manifests) else 1
 
 
 def cmd_grid(args: argparse.Namespace) -> int:
@@ -129,7 +162,8 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("build", help="build the CUDA probes")
-    b.add_argument("--arch", default="sm_121a")
+    b.add_argument("--arch", default=None,
+                   help="sm_121a by default; sm_120a is picked automatically on a CC 12.0 GPU")
     b.add_argument("--nvcc")
     b.set_defaults(fn=cmd_build)
 
@@ -155,6 +189,8 @@ def main() -> int:
     r.add_argument("--evict-file", help="file_page: evict by reading this >RAM file instead of fadvise")
     r.add_argument("--pin-cpus", default="", help="sync: also run blocking pinned to these CPUs, e.g. 0,10")
     r.add_argument("--no-report", action="store_true")
+    r.add_argument("--repeat", type=int, default=1, metavar="N",
+                   help="run the probe N times (separate run directories, one report)")
     r.set_defaults(fn=cmd_run)
 
     r = sub.add_parser("grid", help="run a probe under each load condition")

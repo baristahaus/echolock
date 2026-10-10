@@ -114,7 +114,11 @@ int main(int argc, char** argv) {
         const unsigned long long until_ns =
             static_cast<unsigned long long>(mono_ns() - gpu_offset +
                                             static_cast<std::int64_t>(o.on_ms * 1e6));
-        load_until_kernel<<<sms * 8, 256, 0, stream>>>(buf, n, slot, rep_nonce(cycles), until_ns);
+        load_until_kernel<<<sms * 8, 256, 0, stream>>>(buf, n, until_ns);
+        EL_CUDA(cudaStreamSynchronize(stream));
+        EL_CUDA(cudaGetLastError());
+        EL_CUDA(cudaMemsetAsync(slot, 0, 4 * sizeof(unsigned), stream));
+        read_xor_kernel<<<sms * 8, 256, 0, stream>>>(buf, n, slot, rep_nonce(cycles));
         EL_CUDA(cudaStreamSynchronize(stream));
         EL_CUDA(cudaGetLastError());
         std::vector<unsigned> got(4);

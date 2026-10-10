@@ -169,6 +169,28 @@ def env_lines(run: RunData) -> list[str]:
     return lines
 
 
+# Clock-event reasons that mean the measurement is polluted: the GPU was throttling, not running
+# at the clocks the numbers assume. gpu_idle is normal and excluded.
+POLLUTION_REASONS = {"sw_power_cap", "hw_slowdown", "sw_thermal_slowdown",
+                     "hw_thermal_slowdown", "hw_power_brake_slowdown", "sync_boost"}
+
+
+def pollution_warnings(run: RunData) -> list[str]:
+    """One line per GPU whose samples show throttling during the run, so a polluted number is
+    flagged in the report instead of read as a result."""
+    out: list[str] = []
+    per_gpu: dict[int, set[str]] = {}
+    for s in run.samples:
+        for g in s.get("gpu") or []:
+            names = {n for n in (g.get("clock_event_names") or []) if n in POLLUTION_REASONS}
+            if names:
+                per_gpu.setdefault(g.get("index", 0), set()).update(names)
+    for i, names in sorted(per_gpu.items()):
+        out.append(f"\u26a0 GPU{i} throttled during the run: {', '.join(sorted(names))} -- "
+                   "clock-dependent numbers are lower than an unthrottled run would give.")
+    return out
+
+
 def sample_stats(run: RunData) -> list[str]:
     """Clock, temperature and power over the run, per GPU, plus host memory headroom."""
     lines: list[str] = []
@@ -302,6 +324,12 @@ def render(run_dirs: list[Path]) -> str:
                    f"{status} | {m.get('started_utc')} | "
                    f"{ok}/{len(m.get('planned_steps', steps))} ok |")
     out += ["", "## Environment", "", *env_lines(first), ""]
+    warnings: list[str] = []
+    for r in runs:
+        for line in pollution_warnings(r):
+            warnings.append(f"- ({r.label}) {line}")
+    if warnings:
+        out += ["## Warnings", "", *warnings, ""]
 
     # Declared, one column per run, so a value that differs between runs (a clock under load,
     # granted flags per schedule) reads side by side like the measurements do.

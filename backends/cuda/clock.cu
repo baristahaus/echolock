@@ -166,8 +166,7 @@ int main(int argc, char** argv) {
             static_cast<unsigned long long>(gpu_now_ns(clock_map))
             + static_cast<unsigned long long>(o.seconds * 1.25e9);
         const unsigned nonce = rep_nonce(0);
-        EL_CUDA(cudaMemsetAsync(slot, 0, 4 * sizeof(unsigned), load_stream));
-        load_until_kernel<<<sms * 8, 256, 0, load_stream>>>(buf, n, slot, nonce, until_ns);
+        load_until_kernel<<<sms * 8, 256, 0, load_stream>>>(buf, n, until_ns);
         EL_CUDA(cudaGetLastError());
 
         const Obj load_tags = Obj().str("condition", "load").uint("load_bytes", bytes);
@@ -176,6 +175,10 @@ int main(int argc, char** argv) {
                                              static_cast<unsigned long long>(o.trace_ms * 1e6),
                                              windows, "load", "clock_trace");
 
+        EL_CUDA(cudaStreamSynchronize(load_stream));
+        // Untimed verification read: one full sweep of the buffer, folded and compared.
+        EL_CUDA(cudaMemsetAsync(slot, 0, 4 * sizeof(unsigned), load_stream));
+        read_xor_kernel<<<sms * 8, 256, 0, load_stream>>>(buf, n, slot, nonce);
         EL_CUDA(cudaStreamSynchronize(load_stream));
         std::vector<unsigned> got(4);
         EL_CUDA(cudaMemcpy(got.data(), slot, 4 * sizeof(unsigned), cudaMemcpyDeviceToHost));

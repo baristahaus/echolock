@@ -448,15 +448,30 @@ inline std::int64_t gpu_now_ns(ClockMap& clock) {
 
 // Streams `data` until %globaltimer passes `until_ns`, folding every word (with a nonce) so the
 // load is verified work, not just traffic. Shared by the clock probe's load and gpuload.
-__global__ void load_until_kernel(const uint4* __restrict__ data, std::size_t n, unsigned* out4,
-                                  unsigned nonce, unsigned long long until_ns) {
-    uint4 acc = make_uint4(0, 0, 0, 0);
+__global__ void load_until_kernel(const uint4* __restrict__ data, std::size_t n,
+                                  unsigned long long until_ns) {
+    // Pure reads, repeated until the deadline. No fold-and-store here: a timed loop's trip count
+    // is whatever the GPU speed makes it, and a fold whose value depends on the sweep count is
+    // either parity-sensitive (accumulating) or optimizer-sensitive (resetting per sweep -- the
+    // compiler may legally keep the __ldcs values in registers across sweeps). Verification is a
+    // separate untimed read_xor_kernel sweep.
     while (global_ns() < until_ns) {
         for (std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x; i < n;
              i += std::size_t(gridDim.x) * blockDim.x) {
-            const uint4 v = __ldcs(data + i);
-            acc.x ^= v.x; acc.y ^= v.y; acc.z ^= v.z; acc.w ^= v.w;
+            __ldcs(data + i);
         }
+    }
+}
+
+// One complete untimed read of the buffer, folded into out4 (xor_reduce_store). The host compares
+// against expected_fill_xor and the nonce.
+__global__ void read_xor_kernel(const uint4* __restrict__ data, std::size_t n, unsigned* out4,
+                                unsigned nonce) {
+    uint4 acc = make_uint4(0, 0, 0, 0);
+    for (std::size_t i = blockIdx.x * std::size_t(blockDim.x) + threadIdx.x; i < n;
+         i += std::size_t(gridDim.x) * blockDim.x) {
+        const uint4 v = __ldcs(data + i);
+        acc.x ^= v.x; acc.y ^= v.y; acc.z ^= v.z; acc.w ^= v.w;
     }
     xor_reduce_store(acc, out4, nonce);
 }
