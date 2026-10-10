@@ -91,8 +91,15 @@ directories, so the verdict is data the report can render.
   now derives a per-sample cpu_busy_frac from /proc/stat deltas), and the sampler's view
   includes the probe's own work, so it bounds the ambient load from below only.
 
-## Next (the one candidate left)
+## Next (the one candidate left) -- BLOCKED on the driver
 
 - File-backed GPU reads: NVIDIA CUDA can import file-backed host memory; AMD Vulkan cannot
-  (backends/vulkan/README.md). One workload, two genuinely different mechanisms. Needs a spec
-  (probes/file_read/spec.md) and a CUDA implementation; the residency model is file_page's.
+  (backends/vulkan/README.md). One workload, two genuinely different mechanisms; the residency
+  model is file_page's.
+- Feasibility tested on this machine (RTX 5090, open kernel module 615.71.09): the GPU can read
+  registered host memory and the XOR oracle works, but `cudaHostRegister` REJECTS file-backed
+  pages -- MAP_SHARED and MAP_PRIVATE mappings of a real file both fail with
+  cudaErrorInvalidArgument, while anonymous malloc and anonymous mmap register fine (control
+  tested). The probe is blocked on the driver accepting file-backed registration. Re-test on a
+  proprietary-kernel-module driver and on GB10's driver before designing around it (the
+  workarounds -- a staging copy or a driver-private pin API -- would change what is measured).
