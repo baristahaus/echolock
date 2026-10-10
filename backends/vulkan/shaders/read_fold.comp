@@ -1,0 +1,30 @@
+#version 450
+// XOR-fold read kernel: every invocation folds its share of the buffer into result[0], and one
+// invocation folds the dispatch's nonce, so a slot nobody wrote cannot match the expectation
+// (the same vacuous-proof rule as the CUDA probes' nonce-folded result slots).
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Data {
+    uint data[];
+};
+
+layout(std430, binding = 1) buffer Out {
+    uint result;
+};
+
+layout(push_constant) uniform Params {
+    uint words;
+    uint nonce;
+} p;
+
+void main() {
+    uint acc = 0;
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x; i < p.words; i += stride) {
+        acc ^= data[i];
+    }
+    atomicXor(result, acc);
+    if (gl_GlobalInvocationID == uvec3(0u)) {
+        atomicXor(result, p.nonce);
+    }
+}

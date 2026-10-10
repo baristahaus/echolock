@@ -93,6 +93,13 @@ messages says so.
 - **`cuda.compiled_arch`** is read out of the binary at runtime (`__CUDA_ARCH__`), and
   `env.json`'s `toolchain.build` is the Makefile stamp (arch, nvcc, flags, built_utc); together
   they say what a run's binaries were built for.
+- **Vulkan backend** probes declare `vulkan.*` keys (api/driver versions, driver name via
+  `vkGetPhysicalDeviceProperties2`, memory heaps with their device-local flags, timestamp
+  period). Every measure is a verified read: the compute shader folds a per-dispatch nonce into
+  its result slot, so an unwritten slot cannot match. Buffers the CPU streams are allocated
+  from a HOST_CACHED memory type when one exists — RADV's non-cached host-visible type maps
+  write-combined and makes CPU reads pathologically slow, which the first CPU contention section
+  learned the hard way.
 - **clock** derives the SM clock from `clock64()` over `%globaltimer` inside a kernel, one block
   per SM, idle and under a verified memory load; `clock_trace` is the per-window series under
   load, `clock_drop_ratio` the load/idle median, `declared_over_derived_ratio` the comparison

@@ -44,7 +44,12 @@ class PlanOptions:
 
 
 PROBES = ("memory", "file_page", "sync", "clock", "pointer_chase", "mma")
-BACKENDS = ("cuda",)
+BACKENDS = ("cuda", "vulkan")
+# What each backend implements; make_plan validates the pair, so the CLI can list the union.
+PROBES_BY_BACKEND = {
+    "cuda": ("memory", "file_page", "sync", "clock", "pointer_chase", "mma"),
+    "vulkan": ("memory",),
+}
 
 
 def binary(backend: str, probe: str) -> Path:
@@ -54,8 +59,10 @@ def binary(backend: str, probe: str) -> Path:
 def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Plan:
     if backend not in BACKENDS:
         raise ValueError(f"backend {backend!r} not implemented (have: {', '.join(BACKENDS)})")
-    if probe not in PROBES:
-        raise ValueError(f"unknown probe {probe!r} (have: {', '.join(PROBES)})")
+    have = PROBES_BY_BACKEND[backend]
+    if probe not in have:
+        raise ValueError(f"probe {probe!r} not implemented for backend {backend!r} "
+                         f"(have: {', '.join(have)})")
     exe = str(binary(backend, probe))
 
     if probe == "memory":

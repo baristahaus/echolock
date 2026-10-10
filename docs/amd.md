@@ -89,27 +89,36 @@ These are the knobs that silently change a measurement, so `env.json` carries th
 3. The sampler's generic hwmon walk is the slow part of a sample and should be cached. Nothing to
    do with AMD.
 
-## What an AMD probe backend would use
+## What an AMD probe backend uses
 
-The design already says Vulkan second, and on AMD that is now the recommended route because RADV
-is open source:
+**The Vulkan backend now exists and has run on AMD hardware** (milestone 5, first probe):
+`backends/vulkan/memory.cpp` measures GPU reads of device-local and host-visible memory, copies
+and CPU/GPU contention through RADV, with the XOR oracle and `VK_QUERY_TYPE_TIMESTAMP` timing.
+First verified numbers on the RX 9070 XT in this box: 626 GB/s VRAM reads, 53.6 GB/s host-RAM
+reads over PCIe, 44.8 GB/s host-to-device copies, CPU reads of the same host buffer at
+159.5 GB/s, and GPU-under-CPU-contention ratio 1.01 (independent resources on a dGPU).
 
-1. **Bandwidth and copies**: `VkBufferCopy` and a compute read kernel, timed with
-   `VkQueryPool` timestamps (`VK_QUERY_TYPE_TIMESTAMP`), oracle unchanged — the XOR fold is
-   backend-neutral and belongs in the probe spec, not the backend.
-2. **Completion latency**: `vkQueueSubmit` + `vkWaitForFences`, the direct analogue of the sync
-   probe.
-3. **Derived clock (principle 3)**: AMD GPUs have `s_get_breg_b32` for the shader clock counters
+One AMD-specific subtlety it caught: RADV's host-visible system-RAM memory type is
+HOST_VISIBLE|HOST_COHERENT but not HOST_CACHED, and maps write-combined — writes through it are
+fast, CPU *reads* pathologically slow. The first CPU contention section read that mapping and
+measured nothing (zero passes in 500 ms, where the same loop on ordinary memory does ~4800).
+The probe now selects a HOST_CACHED type for buffers the CPU streams. A GPU-side-only
+measurement would never notice this; a CPU/GPU shared one cannot avoid it.
+
+`./echolock run memory --backend vulkan` is the way to run it. The rest of the original plan,
+for what Vulkan has not covered yet:
+
+1. **Completion latency**: `vkQueueSubmit` + `vkWaitForFences`, the direct analogue of the sync
+   probe; a pointer-chase compute shader for the latency map (file-backed pages have no Vulkan
+   equivalent, so the cold-fault measurement stays CUDA-side on GB10).
+2. **Derived clock (principle 3)**: AMD GPUs have `s_get_breg_b32` for the shader clock counters
    and `s_memrealtime` for a nanosecond timestamp. Both are in the machine-readable ISA — read it,
    don't repeat folklore, and check the result against `pp_dpm_sclk` the same way the environment
    layer now checks `gpu_metrics`.
-4. **KFD directly** (`/dev/kfd` ioctls via rocm-thunk headers) if a probe needs
+3. **KFD directly** (`/dev/kfd` ioctls via rocm-thunk headers) if a probe needs
    instruction-level control Vulkan will not give, e.g. the pointer-chase latency map.
-5. **A HIP/ROCr port** only if a question is left open that Vulkan cannot answer; it is the
+4. **A HIP/ROCr port** only if a question is left open that Vulkan cannot answer; it is the
    heaviest dependency of the five.
-
-Until one exists, `plans.py` still rejects `--backend` other than `cuda`. Saying "no AMD probe
-yet" is a better outcome than reporting an AMD number that came from a CUDA binary.
 
 ## Sources
 
