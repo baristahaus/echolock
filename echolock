@@ -19,7 +19,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from run.plans import BACKENDS, PROBES, PlanOptions, binary, make_plan  # noqa: E402
+from run.plans import (BACKENDS, PROBES, PlanOptions, binary, honours_pin_cpus,  # noqa: E402
+                       make_plan)
 from run.runner import (Run, RunInterrupted, RunOptions, interrupt_exit_code,  # noqa: E402
                         new_run_id)
 
@@ -81,6 +82,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not exe.exists():
         print(f"{exe} is missing; run ./echolock build first", file=sys.stderr)
         return 2
+    pin_cpus = [int(c) for c in args.pin_cpus.split(",") if c.strip()]
+    if pin_cpus and not honours_pin_cpus(args.probe, args.backend):
+        print(f"--pin-cpus does nothing for {args.probe} on {args.backend}: only sync builds "
+              "taskset-wrapped steps, so the run would be unpinned and the record would not say "
+              "so. Drop --pin-cpus, or wrap the probe yourself (taskset -c 0 ./build/cuda/memory).",
+              file=sys.stderr)
+        return 2
     opts = RunOptions(out_root=Path(args.out), label=args.label,
                       load={"name": args.label}, sample_interval_s=args.interval,
                       drop_caches=args.drop_caches)
@@ -88,7 +96,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     run_id = new_run_id(args.probe, args.backend, args.label)
     run_dir = opts.out_root / run_id
     plan_opts = PlanOptions(extra=extra, scratch_dir=Path(args.scratch_dir) if args.scratch_dir else None,
-                            pin_cpus=[int(c) for c in args.pin_cpus.split(",") if c],
+                            pin_cpus=pin_cpus,
                             evict_file=args.evict_file)
     run = Run(make_plan(args.probe, args.backend, run_dir, plan_opts), opts, run_id)
     dirs: list[Path] = []
@@ -179,6 +187,11 @@ def cmd_crosscheck(args: argparse.Namespace) -> int:
     backends = [args.backend_a, args.backend_b]
     if args.backend_a == args.backend_b:
         print("crosscheck needs two different backends", file=sys.stderr)
+        return 2
+    pin_cpus = [int(c) for c in args.pin_cpus.split(",") if c.strip()]
+    if pin_cpus and not all(honours_pin_cpus(args.probe, b) for b in backends):
+        print("--pin-cpus does nothing for this probe/backend pair (only sync on cuda builds "
+              "taskset steps); the crosscheck would compare two unpinned runs", file=sys.stderr)
         return 2
     missing = [b for b in backends if not binary(b, args.probe).exists()]
     if missing:
