@@ -73,6 +73,10 @@ directories, so the verdict is data the report can render.
 - [x] Phase 1: cross-backend report columns; `crosscheck` mode (per-backend args via
   `--a-args`/`--b-args`; warns when the two runs declared different devices). Row alignment
   across backends stays open until Phase 3 defines the tag mapping.
-- [ ] Phase 2: constants probe
-- [ ] Phase 3: equivalence tolerances; bit-exact mma check
+- [x] Phase 2: constants probe (host backend; NVML / nvidia-smi / proc-information / amdgpu
+  sysfs / KFD / vulkaninfo sources compared per device fact).
+- [ ] Phase 3: equivalence tolerances; bit-exact mma check.
+  Finding: the Vulkan mma and sync probes fail on NVIDIA (vkCreateDevice ->
+  EXTENSION_NOT_PRESENT; query results -> DEVICE_LOST) — they were verified only on AMD/RADV.
+  Cross-stack tolerance checks land for memory and pointer_chase, which work on both.
 - [ ] Phase 4: docs/platforms.md

@@ -8,6 +8,7 @@ without losing the phases before it (file_page).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,16 +44,20 @@ class PlanOptions:
     evict_file: str | None = None                  # file_page: evict by reading this file
 
 
-PROBES = ("memory", "file_page", "sync", "clock", "pointer_chase", "mma")
-BACKENDS = ("cuda", "vulkan")
+PROBES = ("memory", "file_page", "sync", "clock", "pointer_chase", "mma", "constants")
+BACKENDS = ("cuda", "vulkan", "host")
 # What each backend implements; make_plan validates the pair, so the CLI can list the union.
 PROBES_BY_BACKEND = {
     "cuda": ("memory", "file_page", "sync", "clock", "pointer_chase", "mma"),
     "vulkan": ("memory", "file_page", "sync", "clock", "pointer_chase", "mma"),
+    "host": ("constants",),
 }
 
 
 def binary(backend: str, probe: str) -> Path:
+    if backend == "host":
+        # The host backend is a Python script: it needs no build step and no GPU API.
+        return ROOT / "backends" / "host" / f"{probe}.py"
     return BUILD / backend / probe
 
 
@@ -64,6 +69,11 @@ def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Pla
         raise ValueError(f"probe {probe!r} not implemented for backend {backend!r} "
                          f"(have: {', '.join(have)})")
     exe = str(binary(backend, probe))
+
+    if probe == "constants":
+        # Host-side Python: every source is best-effort and none touch the GPU API.
+        return Plan(probe, backend, [Step("constants", [sys.executable, exe, *opts.extra],
+                                          timeout_s=120)])
 
     if probe == "memory":
         return Plan(probe, backend,

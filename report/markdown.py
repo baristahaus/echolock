@@ -310,6 +310,85 @@ def step_env_rows(run: RunData) -> list[str]:
     return out
 
 
+# Tag values that mean the same resource under different backend vocabularies, and backend-only
+# tags dropped when aligning rows (they record per-backend mechanics, not the resource).
+TAG_ALIASES = {
+    "kind": {"vulkan_device_local": "device", "vulkan_host_visible": "pinned"},
+    "source": {"vulkan_device_local": "cudaMalloc", "vulkan_host_visible": "cudaHostAlloc_mapped"},
+}
+DROPPED_TAGS = {"heap_device_local", "heap_host_visible", "gpu_us", "copy_us", "verify_read_us",
+                "footprint_bytes"}
+
+# Relative tolerance per metric for the cross-stack verdict: both implementations must find the
+# same device behaviour, but they time through different APIs.
+METRIC_TOLERANCE = {
+    "gpu_read": 0.15, "copy_payload": 0.20, "cpu_read": 0.20,
+    "chase_hop_latency": 0.30, "mma_throughput": 0.25,
+}
+DEFAULT_TOLERANCE = 0.15
+
+
+def _align_tags(tags: dict) -> dict:
+    out = {}
+    for k, v in (tags or {}).items():
+        if k in DROPPED_TAGS:
+            continue
+        out[k] = TAG_ALIASES.get(k, {}).get(v, v)
+    return out
+
+
+def cross_stack_section(runs: list[RunData], rows: list[dict]) -> list[str]:
+    """Aligns equivalent (step, metric, tags) rows across backends and judges each pair against
+    the metric's tolerance. Only pairs both backends measured appear; a one-sided row stays in
+    the Measured table above."""
+    per_backend: dict[str, dict] = {}
+    for r, rs in zip(runs, rows):
+        backend = r.manifest.get("backend") or "?"
+        for (step, name, tags_text_), e in rs.items():
+            if e.get("verified") is False:
+                continue  # a failed oracle is not a result to compare
+            tags = _align_tags(_parse_tags(tags_text_))
+            per_backend.setdefault(backend, {})[(step, name, tags_text(tags))] = e
+    backends = sorted(per_backend)
+    if len(backends) < 2:
+        return []
+    a, b = backends[0], backends[1]
+    out = [f"## Cross-stack: {a} vs {b}", "",
+           "Equivalent metrics aligned through the tag-alias map (docs/crosscheck.md). The ratio "
+           "is " + a + " / " + b + "; ✓ within tolerance, ⚠ diverges -- a divergence is a "
+           "finding, not a failure.", ""]
+    out.append("| Step | Metric | Tags | " + f"{a} | {b} | ratio | tol | verdict |")
+    out.append("|---|---|---|---:|---:|---:|---:|---|")
+    n_agree = n_diverge = 0
+    for key in sorted(set(per_backend[a]) & set(per_backend[b])):
+        ea, eb = per_backend[a][key], per_backend[b][key]
+        va, vb = ea["value"], eb["value"]
+        if not isinstance(va, (int, float)) or not isinstance(vb, (int, float)) or vb == 0:
+            continue
+        tol = METRIC_TOLERANCE.get(key[1], DEFAULT_TOLERANCE)
+        ratio = va / vb
+        ok = abs(ratio - 1.0) <= tol
+        n_agree += ok
+        n_diverge += not ok
+        mark = "✓" if ok else "⚠"
+        out.append(f"| {key[0]} | {key[1]} | {key[2]} | {fmt(va, ea['unit'])} | "
+                   f"{fmt(vb, eb['unit'])} | {ratio:.3f} | {int(tol * 100)}% | {mark} |")
+    if n_agree + n_diverge == 0:
+        return []  # nothing aligned: say nothing rather than an empty table
+    out += ["", f"{n_agree} agree, {n_diverge} diverge within the aligned set.", ""]
+    return out
+
+
+def _parse_tags(text: str) -> dict:
+    """Inverse of tags_text for the alias pass; tags_text output is 'k=v, k=v' ordered."""
+    out = {}
+    for part in (text or "").split(", "):
+        k, _, v = part.partition("=")
+        if v:
+            out[k] = v
+    return out
+
+
 def render(run_dirs: list[Path]) -> str:
     runs = [RunData(d) for d in run_dirs]
     if not runs:
@@ -391,6 +470,12 @@ def render(run_dirs: list[Path]) -> str:
                 cells.append(cell)
             out.append(f"| {k[0]} | {k[1]} | {k[2]} | " + " | ".join(cells) + " |")
         out.append("")
+
+    # Cross-stack: when the runs come from more than one backend, align equivalent metrics through
+    # a tag-alias map and give a tolerance verdict per pair. Two independent implementations of
+    # the same probe semantics must find the same device behaviour; a divergence is a finding.
+    if len({r.manifest.get("backend") for r in runs}) > 1:
+        out += cross_stack_section(runs, rows)
 
     # Checks and fallbacks.
     out += ["## Verification", ""]
