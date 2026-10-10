@@ -64,6 +64,14 @@ class RunData:
     def label(self) -> str:
         return self.manifest.get("label", self.dir.name)
 
+    @property
+    def column(self) -> str:
+        """Column key in a side-by-side report. Runs from different backends of the same probe
+        get one column each, so a CUDA run and a Vulkan run sit side by side even when they share
+        a load-condition label (crosscheck mode)."""
+        backend = self.manifest.get("backend")
+        return f"{self.label} [{backend}]" if backend else self.label
+
     def of_type(self, t: str) -> list[dict]:
         return [r for r in self.records if r.get("type") == t]
 
@@ -327,7 +335,7 @@ def render(run_dirs: list[Path]) -> str:
     warnings: list[str] = []
     for r in runs:
         for line in pollution_warnings(r):
-            warnings.append(f"- ({r.label}) {line}")
+            warnings.append(f"- ({r.column}) {line}")
     if warnings:
         out += ["## Warnings", "", *warnings, ""]
 
@@ -344,13 +352,13 @@ def render(run_dirs: list[Path]) -> str:
             for d in ds:
                 row_id = key if len(ds) == 1 else f"{key} [{d.get('step', '')}]"
                 row = declared_rows.setdefault(row_id, {"source": d.get("source", ""), "values": {}})
-                row["values"][r.label] = json.dumps(d.get("value"))
+                row["values"][r.column] = json.dumps(d.get("value"))
     if declared_rows:
         out += ["## Declared", "",
-                "| Key | Source | " + " | ".join(r.label for r in runs) + " |",
+                "| Key | Source | " + " | ".join(r.column for r in runs) + " |",
                 "|---|---|" + "---|" * len(runs)]
         for rid, row in declared_rows.items():
-            cells = " | ".join(row["values"].get(r.label, "—") for r in runs)
+            cells = " | ".join(row["values"].get(r.column, "—") for r in runs)
             out.append(f"| {rid} | {row['source']} | {cells} |")
         out.append("")
 
@@ -365,7 +373,7 @@ def render(run_dirs: list[Path]) -> str:
         out += ["## Measured", "",
                 "Values are the series summary (per-rep spread in brackets). ✗ marks a value whose "
                 "oracle check failed; it is not a result.", ""]
-        out.append("| Step | Metric | Tags | " + " | ".join(r.label for r in runs) + " |")
+        out.append("| Step | Metric | Tags | " + " | ".join(r.column for r in runs) + " |")
         out.append("|---|---|---|" + "---:|" * len(runs))
         for k in keys:
             cells = []

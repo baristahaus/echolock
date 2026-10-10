@@ -104,7 +104,8 @@ class RunnerTest(unittest.TestCase):
         a.execute()
         b.execute()
         text = render([a.dir, b.dir])
-        self.assertIn("| Step | Metric | Tags | idle | load50 |", text)
+        # Columns are label + backend, so runs of the same probe from two backends never collide.
+        self.assertIn("| Step | Metric | Tags | idle [test] | load50 [test] |", text)
         row = next(l for l in text.splitlines() if l.startswith("| s | bw |"))
         self.assertIn("101.0 GB/s [100.0–102.0]", row)
         self.assertTrue(row.rstrip(" |").endswith("✗"), row)  # load50's value failed its oracle

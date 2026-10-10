@@ -70,7 +70,9 @@ directories, so the verdict is data the report can render.
 
 ## Status
 
-- [ ] Phase 1: cross-backend report columns; `crosscheck` mode
+- [x] Phase 1: cross-backend report columns; `crosscheck` mode (per-backend args via
+  `--a-args`/`--b-args`; warns when the two runs declared different devices). Row alignment
+  across backends stays open until Phase 3 defines the tag mapping.
 - [ ] Phase 2: constants probe
 - [ ] Phase 3: equivalence tolerances; bit-exact mma check
 - [ ] Phase 4: docs/platforms.md

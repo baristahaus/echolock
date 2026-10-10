@@ -146,6 +146,69 @@ def cmd_grid(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_crosscheck(args: argparse.Namespace) -> int:
+    """Phase 1 of docs/crosscheck.md: run the same probe on two backends of this GPU and put the
+    run directories side by side in one report. Each run keeps its own oracle verdict; reading
+    the columns next to each other is the point."""
+    from report.markdown import render
+    backends = [args.backend_a, args.backend_b]
+    if args.backend_a == args.backend_b:
+        print("crosscheck needs two different backends", file=sys.stderr)
+        return 2
+    missing = [b for b in backends if not binary(b, args.probe).exists()]
+    if missing:
+        print(f"missing binaries for {', '.join(missing)}; run ./echolock build and "
+              "make -C backends/vulkan", file=sys.stderr)
+        return 2
+    opts = RunOptions(out_root=Path(args.out), label=args.label, load={"name": args.label},
+                      sample_interval_s=args.interval,
+                      drop_caches=args.drop_caches)
+    def plan_opts(extra: list[str]) -> PlanOptions:
+        return PlanOptions(extra=extra,
+                           scratch_dir=Path(args.scratch_dir) if args.scratch_dir else None,
+                           pin_cpus=[int(c) for c in args.pin_cpus.split(",") if c],
+                           evict_file=args.evict_file)
+    per_backend = {args.backend_a: plan_opts(args.a_args.split() if args.a_args else []),
+                   args.backend_b: plan_opts(args.b_args.split() if args.b_args else [])}
+    dirs: list[Path] = []
+    try:
+        for b in backends:
+            run_id = new_run_id(args.probe, b, args.label)
+            run_dir = opts.out_root / run_id
+            run = Run(make_plan(args.probe, b, run_dir, per_backend[b]),
+                      RunOptions(out_root=Path(args.out), label=args.label,
+                                 load={"name": args.label}, sample_interval_s=args.interval,
+                                 drop_caches=args.drop_caches),
+                      run_id)
+            print(f"[echolock] crosscheck {b}: {run.run_id}: {len(run.plan.steps)} step(s)",
+                  file=sys.stderr)
+            manifest = run.execute()
+            dirs.append(run.dir)
+            for s in manifest["steps"]:
+                print(f"[echolock]   {b} {s['name']}: {s['status']} (rc={s['returncode']}, "
+                      f"{(s['end_ns'] - s['start_ns']) / 1e9:.1f} s, {s['failed_checks']} failed checks)",
+                      file=sys.stderr)
+    except (KeyboardInterrupt, RunInterrupted) as e:
+        print(f"[echolock] crosscheck interrupted after {len(dirs)} run(s); keeping them",
+              file=sys.stderr)
+        if dirs:
+            (opts.out_root / "crosscheck-report.md").write_text(render(dirs))
+        return interrupt_exit_code(e)
+    (opts.out_root / "crosscheck-report.md").write_text(render(dirs))
+    # A crosscheck compares backends on one GPU; if the two runs declared different devices, say
+    # so loudly (e.g. a Vulkan default device picking an iGPU while CUDA uses the discrete card).
+    from report.markdown import RunData
+    names = {b: next((d.get("value") for d in RunData(d_).of_type("declared")
+                      if d.get("key") == "device.name"), "?")
+             for b, d_ in zip(backends, dirs)}
+    if len(set(names.values())) > 1:
+        print(f"[echolock] WARNING: the two runs used different devices: "
+              + "; ".join(f"{b} -> {n}" for b, n in names.items())
+              + " -- point both backends at the same GPU (see --a-args/--b-args)", file=sys.stderr)
+    print(opts.out_root / "crosscheck-report.md")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     from report.markdown import render
     text = render([Path(d) for d in args.runs])
@@ -206,6 +269,21 @@ def main() -> int:
     r.add_argument("--scratch-dir")
     r.add_argument("--no-report", action="store_true")
     r.set_defaults(fn=cmd_grid)
+
+    rep = sub.add_parser("crosscheck", help="run one probe on two backends and report side by side")
+    rep.add_argument("probe", choices=PROBES)
+    rep.add_argument("--backend-a", default="cuda", choices=BACKENDS)
+    rep.add_argument("--backend-b", default="vulkan", choices=BACKENDS)
+    rep.add_argument("--label", default="idle", help="load condition name for both runs")
+    rep.add_argument("--out", default=str(ROOT / "runs"))
+    rep.add_argument("--interval", type=float, default=1.0, help="sampler interval, s")
+    rep.add_argument("--drop-caches", action="store_true")
+    rep.add_argument("--scratch-dir")
+    rep.add_argument("--evict-file")
+    rep.add_argument("--pin-cpus", default="")
+    rep.add_argument("--a-args", help="probe arguments for backend A, quoted")
+    rep.add_argument("--b-args", help="probe arguments for backend B, quoted")
+    rep.set_defaults(fn=cmd_crosscheck)
 
     rep = sub.add_parser("report", help="Markdown report for run directories")
     rep.add_argument("runs", nargs="+")
