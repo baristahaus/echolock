@@ -439,6 +439,9 @@ def render(run_dirs: list[Path]) -> str:
             status += f" ({m['status_note']})"
         if r.problem:
             status += f" \u26a0 {r.problem}"
+        lc = (m.get("load_check") or {})
+        if lc.get("pass") is False:
+            status += f" \u26a0 load below target ({json.dumps(lc)})"
         out.append(f"| {m.get('run_id') or r.dir} | {r.label} | {json.dumps(m.get('load'))} | "
                    f"{status} | {m.get('started_utc')} | "
                    f"{ok}/{len(m.get('planned_steps', steps))} ok |")

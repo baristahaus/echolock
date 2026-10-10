@@ -38,6 +38,29 @@ def read_int(path: str | Path) -> int | None:
         return None
 
 
+_last_stat: tuple[int, int] | None = None
+
+
+def _cpu_busy_frac() -> float | None:
+    """Fraction of CPU time spent busy since the previous sample, from /proc/stat deltas. A
+    per-sample counter: loadavg is a minutes-scale average and cannot validate a 10 s load."""
+    global _last_stat
+    try:
+        fields = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
+        vals = [int(v) for v in fields]
+    except (OSError, ValueError, IndexError):
+        return None
+    idle = vals[3] + (vals[4] if len(vals) > 4 else 0)   # idle + iowait
+    total = sum(vals)
+    out = None
+    if _last_stat is not None:
+        d_total, d_idle = total - _last_stat[0], idle - _last_stat[1]
+        if d_total > 0:
+            out = max(0.0, min(1.0, 1.0 - d_idle / d_total))
+    _last_stat = (total, idle)
+    return out
+
+
 def meminfo() -> dict:
     out: dict[str, int] = {}
     try:
@@ -185,6 +208,7 @@ class Sampler:
         rec: dict = {"v": 1, "t_ns": t0, "src": "sampler", "type": "sample"}
         rec["gpu"], rec["gpu_source"] = self.gpu_state()
         rec["host"] = {
+            "cpu_busy_frac": _cpu_busy_frac(),
             "cpu_khz": cpu_freqs_khz(),
             "thermal_c": thermal_zones(),
             "hwmon": hwmon(),
