@@ -48,7 +48,7 @@ BACKENDS = ("cuda", "vulkan")
 # What each backend implements; make_plan validates the pair, so the CLI can list the union.
 PROBES_BY_BACKEND = {
     "cuda": ("memory", "file_page", "sync", "clock", "pointer_chase", "mma"),
-    "vulkan": ("memory", "pointer_chase"),
+    "vulkan": ("memory", "file_page", "sync", "clock", "pointer_chase", "mma"),
 }
 
 
@@ -82,12 +82,22 @@ def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Pla
     if probe == "pointer_chase":
         # The probe manages residency itself (resident walks then an evicted cold walk), so no
         # drop before it -- that would evict the pages its resident walks are about to measure.
+        # The CUDA probe takes a scratch file it maps for the resident-vs-evicted walk; the
+        # Vulkan probe measures buffers only (no file residency path), so no scratch file.
+        if backend == "vulkan":
+            return Plan(probe, backend,
+                        [Step("pointer_chase", [exe, *opts.extra], timeout_s=900)])
         scratch = (opts.scratch_dir or run_dir) / "pointer_chase.scratch"
         common = ["--file", str(scratch), *opts.extra]
         return Plan(probe, backend,
                     [Step("pointer_chase", [exe, *common], timeout_s=900)], cleanup=[scratch])
 
     if probe == "sync":
+        if backend == "vulkan":
+            # The Vulkan probe has no SCHEDULE axis (no device-side schedule flag on a queue
+            # submission): one step measures the one behavior.
+            return Plan(probe, backend,
+                        [Step("sync", [exe, *opts.extra], timeout_s=900, drop_caches=True)])
         steps = [Step(f"schedule={s}", [exe, "--schedule", s, *opts.extra], timeout_s=600,
                       drop_caches=True)
                  for s in ("blocking", "yield", "spin", "auto")]
@@ -95,6 +105,12 @@ def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Pla
                        ["taskset", "-c", str(c), exe, "--schedule", "blocking", *opts.extra],
                        timeout_s=600, drop_caches=True) for c in opts.pin_cpus]
         return Plan(probe, backend, steps)
+
+    if backend == "vulkan":
+        # The Vulkan file_page probe runs all phases in one process (it measures the import path
+        # on anonymous memory; RADV rejects file-backed imports, so no scratch file is needed).
+        return Plan(probe, backend,
+                    [Step("file_page", [exe, *opts.extra], timeout_s=900, drop_caches=True)])
 
     # file_page. The scratch file must be on a page-cache-backed filesystem (not tmpfs), or
     # eviction is impossible and the cold phases measure nothing.

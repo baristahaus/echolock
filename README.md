@@ -17,8 +17,8 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 | 2. Port memory, file_page, sync with JSONL output | done (compiles for sm_121a; not yet run on GB10) |
 | 3. Derived SM clock, pointer-chase latency map, per-format MMA throughput | done (compiles for sm_121a incl. fp4; not yet run on GB10) |
 | 4. Load generators and grid runner | done; loads measured + tested on this box, GPU load compiles (needs GB10 to run) ([load/](load/README.md)) |
-| 5. Vulkan backend | memory + pointer_chase done; both run on AMD via RADV with verified results; sync probe pending ([backends/vulkan/](backends/vulkan/README.md)) |
-| AMD: environment, kernel log, docs | done on amdgpu hardware; memory + pointer_chase probes run on AMD via RADV ([docs/amd.md](docs/amd.md)) |
+| 5. Vulkan backend | all six probes done and verified on AMD via RADV: memory, pointer_chase, mma (fp16/bf16/int8 bit-exact), sync, clock, file_page ([backends/vulkan/](backends/vulkan/README.md)) |
+| AMD: environment, kernel log, docs, full probe suite | done on amdgpu hardware; all six probes run on AMD via RADV and through `./echolock run` ([docs/amd.md](docs/amd.md)) |
 
 ## Quick start (on the GPU machine)
 
@@ -52,10 +52,14 @@ need no `-lcuda` and no vendor libraries.
 **AMD GPUs** are supported for the environment side today: clocks, temperature, power, utilisation,
 VRAM and kernel-log resets come from the `amdgpu` driver's own sysfs files, with no ROCm, no AMD
 SMI and no other library. What is open on AMD's side and what an AMD probe backend would use is
-written up in [docs/amd.md](docs/amd.md). The **memory** and **pointer_chase** probes also run
-on AMD through the Vulkan backend (RADV), so bandwidth, copies, contention and the latency map
-are measured on AMD hardware today; the probes that need CUDA (mma, file_page, sync, clock)
-are CUDA-only.
+written up in [docs/amd.md](docs/amd.md). **All six probes also run on AMD** through the Vulkan backend (RADV), so the full measurement
+suite — bandwidth, copies, contention, the latency map, tensor throughput, device clocks,
+submit/fence lag and host-page behaviour — is measured on AMD hardware today, through an open
+driver. Where CUDA and Vulkan semantics differ on AMD (no real-time device clock in GLSL, no
+file-backed host-memory import, GLSL cooperative-matrix accumulator semantics), the probes
+document the difference instead of forcing the CUDA shape onto Vulkan; see
+[backends/vulkan/README.md](backends/vulkan/README.md) for the findings and
+[docs/lessons.md](docs/lessons.md) for the debugging traps behind them.
 
 ## Layout
 
@@ -69,7 +73,8 @@ load/                     load generators (cpu, mem, io, gpu) speaking one JSONL
 run/                      plans.py (probe → process steps), runner.py (steps + env → run directory), grid.py (load conditions) (AMD via sysfs)
 run/                      plans.py (probe → process steps), runner.py (steps + env → run directory)
 report/                   markdown.py: declared vs measured, one column per run label
-docs/                     brief.md (design), record-format.md (JSONL schema), amd.md (AMD enablement)
+docs/                     brief.md (design), record-format.md (JSONL schema), amd.md (AMD enablement),
+                          lessons.md (debugging lessons)
 tests/                    python3 -m unittest discover -s tests -t .
 ```
 
