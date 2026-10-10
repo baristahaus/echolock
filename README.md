@@ -77,7 +77,7 @@ run/                      plans.py (probe → process steps), runner.py (steps +
 run/                      plans.py (probe → process steps), runner.py (steps + env → run directory)
 report/                   markdown.py: declared vs measured, one column per run label
 docs/                     brief.md (design), record-format.md (JSONL schema), amd.md (AMD enablement),
-                          lessons.md (debugging lessons)
+                          lessons.md (debugging lessons), crosscheck.md (cross-platform plan)
 tests/                    python3 -m unittest discover -s tests -t .
 ```
 
