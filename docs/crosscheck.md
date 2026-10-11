@@ -91,7 +91,7 @@ directories, so the verdict is data the report can render.
   now derives a per-sample cpu_busy_frac from /proc/stat deltas), and the sampler's view
   includes the probe's own work, so it bounds the ambient load from below only.
 
-## Next (the one candidate left) -- BLOCKED on the driver
+## Next (the one candidate left) -- blocked on ONE driver, works on GB10
 
 - File-backed GPU reads: NVIDIA CUDA can import file-backed host memory; AMD Vulkan cannot
   (backends/vulkan/README.md). One workload, two genuinely different mechanisms; the residency
@@ -100,6 +100,27 @@ directories, so the verdict is data the report can render.
   registered host memory and the XOR oracle works, but `cudaHostRegister` REJECTS file-backed
   pages -- MAP_SHARED and MAP_PRIVATE mappings of a real file both fail with
   cudaErrorInvalidArgument, while anonymous malloc and anonymous mmap register fine (control
-  tested). The probe is blocked on the driver accepting file-backed registration. Re-test on a
-  proprietary-kernel-module driver and on GB10's driver before designing around it (the
-  workarounds -- a staging copy or a driver-private pin API -- would change what is measured).
+  tested). The probe is blocked on the driver accepting file-backed registration.
+- **Re-tested on GB10 as requested (Asus GX10, sm_121a, open kernel module 580.173.02, ext4 on
+  NVMe): it is not blocked here.** `cudaHostRegister` accepted file-backed pages in every variant
+  tried -- MAP_SHARED and MAP_PRIVATE, `PROT_READ|PROT_WRITE` and `PROT_READ` only, flags 0 and
+  `cudaHostRegisterMapped` -- and the anonymous control also passed, so nothing about the harness
+  is doing the work. Register success alone is not the evidence; the device then read 8 MiB through
+  the registered file-backed pointer and a checksum over it matched the host-written pattern
+  exactly (1,069,547,520 = 1,069,547,520), for both flag settings. Unregistered file-backed reads
+  also work through the second-level page tables (`cudaMemcpy` from a `MAP_SHARED` file mapping
+  succeeds), and `file_page --phase res-seq` on this box measures that path at 163.8 GB/s with
+  `page_cache_resident` 1.0 on a 2 GiB file.
+- So the block is **specific to the 5090 / 615.71.09 pair**, not a CUDA-wide rule, and a CUDA
+  `gpu_read` phase is viable on this platform rather than needing a staging copy. Two caveats
+  before designing on it. (1) Fault state is still untested: `mincore` reports *page-cache*
+  residency, not the mapping's fault state, so my seven variants all measured 16384/16384 resident
+  and none of them was genuinely unfaulted -- settling it means evicting between map and register,
+  which on a node with a resident engine means doing it somewhere else. (2) I did not reproduce
+  their exact conditions (5090 geometry, their file's filesystem, hugepages, `O_DIRECT`), so this
+  is "works on GB10/580", not "the 5090 report was wrong". The check is a standalone ~60-line
+  binary, not a repo artifact: map a file, write a pattern through the mapping, register, get the
+  device pointer, checksum from a kernel, compare -- and print unbuffered, because a probe that
+  segfaults with buffered stdout takes its own diagnosis with it (docs/lessons.md item 8). The
+  three variants used here, with their output, are kept outside the repo at
+  `192.168.0.25:~/echolock-runs-gb10-20261010/repros/` alongside the run records.
