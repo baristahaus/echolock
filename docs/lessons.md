@@ -100,3 +100,16 @@ itself works and the rejection is specific to file-backed pages -- a driver limi
 probe bug, and not something to design around until it is re-tested on other drivers. Also: a
 segfaulting feasibility test had an unbuffered-diagnosis detour worth keeping -- printf to a
 crashed process loses buffered output, so feasibility scaffolds should `vdprintf(2, ...)`.
+
+**The re-test happened, and the limitation moved.** On GB10 with open kernel module 580.173.02 the
+same call accepts file-backed pages in every variant tried (MAP_SHARED and MAP_PRIVATE, read-only
+and read-write, flags 0 and `Mapped`), and the device reads correct data through the registered
+pointer -- a checksum over 8 MiB matched the host-written pattern. "The driver rejects it" was
+true of one driver/platform pair and is not a property of CUDA, and the workaround that would have
+changed what is measured (a staging copy) turned out not to be needed on the project's primary
+target. Two things this kind of re-test must not overclaim: register returning `cudaSuccess` is not
+evidence the mapping works, so checksum from the device; and `mincore` reports page-cache residency,
+not a mapping's fault state, so an "unfaulted" file mapping that measures 16384/16384 resident was
+never unfaulted -- the fault-state question is still open (docs/crosscheck.md). The instruction in
+the original note -- re-test before designing around it -- is what kept a wrong platform-wide
+conclusion from becoming a design; keep it as procedure.
