@@ -164,6 +164,11 @@ def nvidia_smi() -> dict | None:
     for g in root.findall("gpu"):
         gpus.append({
             "pci_bus_id": g.get("id"),
+            # The device's identity, from the <gpu uuid="..."> attribute. Every NVIDIA source that
+            # reports a device reports this one string, and bus ids are not comparable across them
+            # (nvidia-smi gives `0000000F:01:00.0`, NVML gives `0001:01:00.0` on this same GB10), so
+            # without it cross-source comparison has nothing to join on. See probes constants.
+            "uuid": t(g, "uuid") or g.get("uuid"),
             "product_name": t(g, "product_name"),
             "architecture": t(g, "product_architecture"),
             "vbios_version": t(g, "vbios_version"),

@@ -71,21 +71,35 @@ def nvidia_sources() -> dict[str, dict[str, dict]]:
             }
     smi = capture.nvidia_smi()
     if smi:
-        for gpu in smi.get("gpu") or []:
-            pci = gpu.get("pci_bus_id") or gpu.get("uuid") or f"smi{len(out)}"
+        # Key by UUID, as the NVML branch above does. Bus ids are not comparable across sources on
+        # this hardware (nvidia-smi reports `0000000F:01:00.0`, NVML `0001:01:00.0` for one GB10),
+        # so keying per source files one device into several buckets and compares nothing silently.
+        for gpu in smi.get("gpus") or []:  # capture returns "gpus"; "gpu" silently yields nothing
+            pci = gpu.get("uuid") or gpu.get("pci_bus_id") or f"smi{len(out)}"
+            # Driver 580 nests clocks as {graphics_clock, sm_clock, mem_clock} with units and "N/A".
+            # Reading max_clocks["sm"] was an older schema and silently yielded None here, so the
+            # clock facts were never compared on this machine.
+            mc, ac = gpu.get("max_clocks") or {}, gpu.get("applications_clocks") or {}
+            smi_sm = _to_int(_first_of(mc, ("sm_clock", "sm", "graphics_clock", "graphics")))
             out.setdefault(pci, {})["nvidia_smi"] = {
                 "name": gpu.get("product_name"),
                 "uuid": gpu.get("uuid"),
                 "vbios": gpu.get("vbios_version"),
-                "max_sm_clock_mhz": _to_int(gpu.get("max_clocks", {}).get("sm")),
-                "max_mem_clock_mhz": _to_int(gpu.get("max_clocks", {}).get("memory")),
-                "power_limit_w": _to_float(gpu.get("power_limit")),
-                "memory_bytes": _to_int((gpu.get("fb_memory_usage") or {}).get("total")),
+                "max_sm_clock_mhz": smi_sm if smi_sm is not None else _to_int(
+                    _first_of(ac, ("sm_clock", "sm"))),
+                "max_mem_clock_mhz": _to_int(_first_of(mc, ("mem_clock", "memory"))),
+                "power_limit_w": _to_float(_first_of(gpu.get("power") or {},
+                                                    ("power_limit", "current_power_limit"))),
+                "memory_bytes": _to_int(_first_of(gpu.get("fb_memory")
+                                                  or gpu.get("fb_memory_usage") or {}, ("total",))),
             }
     for info in sorted(Path("/proc/driver/nvidia/gpus").glob("*/information")) or []:
         text = info.read_text()
         vals = dict(re.findall(r"^(\w+)\s*: (.*)$", text, re.M))
-        pci = vals.get("Bus Location", "").lower().replace("0000:", "").replace(":", "")
+        # Same reason: prefer the UUID, which all three sources carry when the driver reports it.
+        # On GB10 this file says `Model: Unknown` with no Bus Location, so this branch contributes
+        # nothing here -- which is exactly what the source_coverage check must report.
+        pci = vals.get("GPU UUID", "") or vals.get("Bus Location", "").lower().replace("0000:", "").replace(":", "")
         if not pci:
             continue
         out.setdefault(pci, {})["proc_information"] = {
@@ -93,6 +107,17 @@ def nvidia_sources() -> dict[str, dict[str, dict]]:
             "vbios": vals.get("Video BIOS"),
         }
     return out
+
+
+def _first_of(d: dict, names):
+    """First present, non-`N/A` value among `names`. nvidia-smi's tag spelling and unit suffixes
+    vary by driver branch, and `N/A` means unavailable rather than zero -- reading it as 0 would
+    turn a missing fact into a wrong one."""
+    for n in names:
+        v = d.get(n)
+        if v is not None and str(v).strip().upper() != "N/A":
+            return v
+    return None
 
 
 def _to_int(v):
@@ -228,6 +253,25 @@ def main() -> int:
     if not vk:
         note("vulkaninfo unavailable or empty: the Vulkan stack is not part of this comparison")
     failed = compare(devices, vk)
+
+    # An `agrees` check needs two sources to agree. A machine whose driver exposes fewer than the
+    # probe assumes therefore emits no checks at all, and probe_end("ok") reads as a clean bill of
+    # health: observed on GB10, where nvidia-smi's device list is keyed "gpus" (not "gpu"), /proc's
+    # per-GPU information file reports `Model: Unknown` with no Bus Location, and no Vulkan ICD is
+    # installed -- 1 source, 0 checks, status ok. Absence of evidence must not print as a pass, the
+    # same rule that puts a ✗ on an unverified measurement.
+    answering = {dev: sorted(s for s, facts in srcs.items()
+                              if any(v is not None for v in facts.values()))
+                 for dev, srcs in devices.items()}
+    thin = {dev: srcs for dev, srcs in answering.items() if len(srcs) < 2}
+    check("source_coverage", not thin and bool(answering),
+          {"per_device": {dev: len(s) for dev, s in answering.items()},
+           "answering": answering,
+           "need": "at least 2 sources per device, or there is nothing to compare",
+           "thin": thin or None})
+    if thin or not answering:
+        failed += 1
+
     probe_end("ok" if failed == 0 else "verify_failed")
     return 0 if failed == 0 else 3
 
