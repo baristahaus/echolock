@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "echolock",
+  "project_id": "e1e2acc7-aa66-4adc-a6d6-0ab75a933e3a"
+}
