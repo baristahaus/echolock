@@ -15,13 +15,21 @@ ROOT = Path(__file__).resolve().parents[1]
 EXE = ROOT / "build" / "vulkan" / "constants"
 CUDABUILD = ROOT / "build" / "cuda"
 
-# Single-source keys in the spec: each must carry a <key>.sources feature record.
-SINGLE_SOURCE_FEATURES = (
-    "constants.device_name.sources",
-    "constants.sm_count.sources",
-    "constants.l2_bytes.sources",
-    "constants.clock_max_mhz.sources",
-)
+# Keys that may end up single-source: each must be covered one of two ways -- an agreement
+# check when two sources answered, or a <key>.sources feature record documenting that only
+# one did. Which one depends on the machine: on a box where /proc/driver/nvidia reports the
+# model, device_name is compared, not documented.
+SOURCE_COVERAGE_KEYS = ("device_name", "sm_count", "l2_bytes", "clock_max_mhz")
+
+
+class _SourceCoverageMixin:
+    def assert_source_coverage(self, recs, feats):
+        checks = {r["name"] for r in recs if r["type"] == "check"}
+        for key in SOURCE_COVERAGE_KEYS:
+            covered = (f"constants.{key}.sources" in feats
+                       or f"constants.{key}.agreement" in checks)
+            self.assertTrue(covered,
+                            f"constants.{key}: no agreement check and no .sources feature")
 
 
 def vulkan_device_present() -> bool:
@@ -43,7 +51,7 @@ def first_error(recs):
 
 @unittest.skipUnless(EXE.exists(), "build/vulkan/constants not built")
 @unittest.skipUnless(vulkan_device_present(), "no Vulkan ICD present")
-class VulkanConstantsTest(unittest.TestCase):
+class VulkanConstantsTest(_SourceCoverageMixin, unittest.TestCase):
     def run_probe(self, extra):
         return run_probe(EXE, extra)
 
@@ -59,8 +67,7 @@ class VulkanConstantsTest(unittest.TestCase):
         self.assertIn(("constants.device_name", "vkGetPhysicalDeviceProperties"), pairs)
         self.assertIn(("constants.memory_bytes", "Vulkan memory heaps"), pairs)
         feats = {r["feature"] for r in recs if r["type"] == "feature"}
-        for f in SINGLE_SOURCE_FEATURES:
-            self.assertIn(f, feats)
+        self.assert_source_coverage(recs, feats)
         return pairs
 
     def assert_memory(self, recs):
@@ -119,7 +126,7 @@ CUDA_NO_GPU = ("cudaErrorInsufficientDriver", "cudaErrorNoDevice", "no CUDA-capa
 
 
 @unittest.skipUnless((CUDABUILD / "constants").exists(), "build/cuda/constants not built")
-class CudaConstantsTest(unittest.TestCase):
+class CudaConstantsTest(_SourceCoverageMixin, unittest.TestCase):
     def test_cuda_device0(self):
         p, recs = run_probe(CUDABUILD / "constants", [])
         end = [r for r in recs if r["type"] == "probe_end"]
@@ -135,8 +142,7 @@ class CudaConstantsTest(unittest.TestCase):
         self.assertIn(("constants.device_name", "cudaGetDeviceProperties"), pairs)
         self.assertIn(("constants.memory_bytes", "cudaGetDeviceProperties"), pairs)
         feats = {r["feature"] for r in recs if r["type"] == "feature"}
-        for f in SINGLE_SOURCE_FEATURES:
-            self.assertIn(f, feats)
+        self.assert_source_coverage(recs, feats)
 
 
 if __name__ == "__main__":

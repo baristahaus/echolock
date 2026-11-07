@@ -13,14 +13,17 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 
 | Milestone | State |
 |---|---|
-| 1. Skeleton, environment capture, Xid watcher, 1 s sampler | done; needs a first run on GB10 |
-| 2. Port memory, file_page, sync with JSONL output | done (compiles for sm_121a; not yet run on GB10) |
-| 3. Derived SM clock, pointer-chase latency map, per-format MMA throughput | done (compiles for sm_121a incl. fp4; not yet run on GB10) |
+| 1. Skeleton, environment capture, Xid watcher, 1 s sampler | done, **and run on GB10**: env capture, 1 s sampler and Xid watcher all work on Asus GX10 hardware (10 runs, kernel log available, 0 events) ([docs/gb10-first-run.md](docs/gb10-first-run.md)) |
+| 2. Port memory, file_page, sync with JSONL output | done; run on GB10 sm_121a with all oracles passing ([docs/gb10-first-run.md](docs/gb10-first-run.md)) |
+| 3. Derived SM clock, pointer-chase latency map, per-format MMA throughput | done; run on GB10 sm_121a — fp4 measured 210 TFLOPS there, and the flat clock trace is flagged in finding 4 ([docs/gb10-first-run.md](docs/gb10-first-run.md)) |
 | 4. Load generators and grid runner | done; loads measured + tested on this box, GPU load compiles (needs GB10 to run) ([load/](load/README.md)) |
 | 5. Vulkan backend | all six probes done and verified on AMD via RADV: memory, pointer_chase, mma (fp16/bf16/int8 bit-exact), sync, clock, file_page ([backends/vulkan/](backends/vulkan/README.md)) |
 | AMD: environment, kernel log, docs, full probe suite | done on amdgpu hardware; all six probes run on AMD via RADV and through `./echolock run` ([docs/amd.md](docs/amd.md)) |
 | NVIDIA discrete (sm_120a, RTX 5090): first real-GPU run of the CUDA backend | all six probes pass on hardware including fp4 (kind::f8f6f4, ~514 TFLOPS measured); first run exposed and fixed four probe bugs: memory copies clobbered the device fill before the contention reads, the mma D-fragment store had d1/d2 swapped, the mma fp8/fp4 `pack4` row/column addressing was wrong, and fp4's packing assumed 2 values/byte instead of the PTX kind::f8f6f4 central-4-bits byte container (plus a `declare_compiled_arch` stream-ordering race and a retry for transient calibration timeouts). fp4 needs the family build (`sm_120a`/`sm_121a`). Runs alongside a resident inference engine with small `--gib`. |
-| Roadmap phases A/B ([docs/roadmap.md](docs/roadmap.md)): constants probe, corpus tooling, soak, AMD env gaps | done on this AMD box (2026-11-06/07, [plan + log](docs/plan-phase-ab.md)): `constants` verified on the 9070 XT and the Raphael iGPU (CUDA side compile-checked, first run awaits a 5090/GB10); `suite`, `diff`/`regress`, `export`, `platforms` (31 runs), `crosscheck --check` with the mma `ref_xor` bit-exactness records (which also caught a degenerate shared mma operand pattern); `soak` grid condition; `gpu_metrics` v2.1 and per-ASIC throttle decode now cross-checked. A real two-backend equivalence verdict still needs a machine with both backends. |
+| Roadmap phases A/B ([docs/roadmap.md](docs/roadmap.md)): constants probe, corpus tooling, soak, AMD env gaps | done on this AMD box (2026-11-06/07, [plan + log](docs/plan-phase-ab.md)): `constants` verified on the 9070 XT, the Raphael iGPU (vulkan), the host stack (amdgpu sysfs + KFD + vulkaninfo) and the RTX 5070 Ti (cuda); `suite`, `diff`/`regress`, `export`, `platforms` (34 runs), `crosscheck --check` with the mma `ref_xor` bit-exactness records (which also caught a degenerate shared mma operand pattern); `soak` grid condition; `gpu_metrics` v2.1 and per-ASIC throttle decode now cross-checked. A real two-backend equivalence verdict still needs a machine with both backends. |
+| NVIDIA consumer Blackwell (sm_120a, dual RTX 5070 Ti) | `constants` ok: API facts agree with `/proc/driver/nvidia` (70 SMs, 2452 MHz max, 15.5 GiB); `mma` fp16 100.3 / bf16 25.1 / int8 200.7 TFLOPS, and the fp16/bf16/int8 `ref_xor` checksums are **all 0x2 — exactly the AMD backend's values** (same n*3 pattern, CUDA WMMA vs Vulkan cooperative-matrix, first cross-architecture agreement of the checksum records) |
+
+| NVIDIA edge (sm_121a, GB10 / Asus GX10): first GB10 run of the CUDA backend | all six probes pass on hardware, 110 checks 0 failed, fp4 210 TFLOPS, GPU read 243 GB/s median, contention ratio 0.7, and it cost a co-resident TP-3 inference engine nothing measurable at `--gib 1`. Two fixes came out of it (`host.cpu_model` was empty on Arm; `--pin-cpus` was accepted and silently ignored outside `sync`) and three open notes: the unified-memory `util_mem_pct: 0`, a zero-variance clock trace, and the order-blindness of the XOR oracle ([docs/gb10-first-run.md](docs/gb10-first-run.md)) |
 
 ## Quick start (on the GPU machine)
 
@@ -77,16 +80,18 @@ document the difference instead of forcing the CUDA shape onto Vulkan; see
 probes/<name>/spec.md     stimulus, oracle, parameters, metrics (backend-neutral)
 backends/cuda/<name>.cu   CUDA implementation; common/echolock.cuh holds the JSONL, oracle and clock helpers
 backends/vulkan/          later
-load/                     background load generators (milestone 4)
-env/                      capture.py (versions, firmware, limits), sampler.py (1 s), kmsg.py (Xid watcher), nvml.py, amdgpu.py
 load/                     load generators (cpu, mem, io, gpu) speaking one JSONL protocol
-run/                      plans.py (probe → process steps), runner.py (steps + env → run directory), grid.py (load conditions) (AMD via sysfs)
-run/                      plans.py (probe → process steps), runner.py (steps + env → run directory)
+env/                      capture.py (versions, firmware, limits), sampler.py (1 s), kmsg.py (Xid watcher), nvml.py, amdgpu.py
+run/                      plans.py (probe → process steps), runner.py (steps + env → run directory), grid.py (load conditions)
 report/                   markdown.py: declared vs measured, one column per run label
 docs/                     brief.md (design), record-format.md (JSONL schema), amd.md (AMD enablement),
                           lessons.md (debugging lessons), crosscheck.md (cross-platform plan),
                           roadmap.md (longterm extension strategy), platforms.md (generated, one
-                          row per run), plan-phase-ab.md (phase A/B execution plan + process log)
+                          row per run), plan-phase-ab.md (phase A/B execution plan + process log),
+                          review-request.md (for agent reviewers),
+                          gb10-first-run.md (first GB10/GB10-OS run: outcomes, findings, caveats),
+                          review-gb10.md (independent GB10-cluster review: the constants
+                          oracle finding that led to its fixture test)
 tests/                    python3 -m unittest discover -s tests -t .
 ```
 

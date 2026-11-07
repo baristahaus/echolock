@@ -8,6 +8,7 @@ without losing the phases before it (file_page).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,16 +45,33 @@ class PlanOptions:
 
 
 PROBES = ("memory", "file_page", "sync", "clock", "constants", "pointer_chase", "mma")
-BACKENDS = ("cuda", "vulkan")
+BACKENDS = ("cuda", "vulkan", "host")
 # What each backend implements; make_plan validates the pair, so the CLI can list the union.
+# constants has three implementations: host (Python, no GPU API) and the CUDA/Vulkan probes.
 PROBES_BY_BACKEND = {
     "cuda": ("memory", "file_page", "sync", "clock", "constants", "pointer_chase", "mma"),
     "vulkan": ("memory", "file_page", "sync", "clock", "constants", "pointer_chase", "mma"),
+    "host": ("constants",),
 }
 
 
 def binary(backend: str, probe: str) -> Path:
+    if backend == "host":
+        # The host backend is a Python script: it needs no build step and no GPU API.
+        return ROOT / "backends" / "host" / f"{probe}.py"
     return BUILD / backend / probe
+
+
+def honours_pin_cpus(probe: str, backend: str) -> bool:
+    """True when this probe/backend pair actually pins a CPU, False when it would ignore the flag.
+
+    pin_cpus is used by one plan only: sync on CUDA, which adds taskset-wrapped blocking steps. It
+    used to be accepted everywhere and dropped in silence, so `run memory --pin-cpus 0` produced an
+    unpinned run, recorded nothing about the request, and read in the shell history as if it had
+    pinned. Refusing is the honest half of the fix; the manifest still will not show which CPUs a
+    sync run pinned beyond the step name (see docs/gb10-first-run.md).
+    """
+    return probe == "sync" and backend == "cuda"
 
 
 def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Plan:
@@ -64,6 +82,14 @@ def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Pla
         raise ValueError(f"probe {probe!r} not implemented for backend {backend!r} "
                          f"(have: {', '.join(have)})")
     exe = str(binary(backend, probe))
+
+    if probe == "constants":
+        # A set of API and sysfs reads; nothing page-cache-related, so no drop, no scratch.
+        if backend == "host":
+            # Host-side Python: every source is best-effort and none touch the GPU API.
+            return Plan(probe, backend, [Step("constants", [sys.executable, exe, *opts.extra],
+                                              timeout_s=120)])
+        return Plan(probe, backend, [Step("constants", [exe, *opts.extra], timeout_s=120)])
 
     if probe == "memory":
         return Plan(probe, backend,
@@ -78,11 +104,6 @@ def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Pla
     if probe == "mma":
         return Plan(probe, backend,
                     [Step("mma", [exe, *opts.extra], timeout_s=600, drop_caches=True)])
-
-    if probe == "constants":
-        # A set of API and sysfs reads; nothing page-cache-related, so no drop, no scratch.
-        return Plan(probe, backend,
-                    [Step("constants", [exe, *opts.extra], timeout_s=120)])
 
     if probe == "pointer_chase":
         # The probe manages residency itself (resident walks then an evicted cold walk), so no

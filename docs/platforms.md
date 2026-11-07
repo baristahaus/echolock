@@ -15,8 +15,10 @@ One row per run directory under `runs/`: the device the probe declared, the stac
 
 | device | vendor | backend | driver | label | — | oracle | run_id | date |
 |---|---|---|---|---|---|---|---|---|
+| — | AMD | host | — | idle | — | pass | 20261107T012249Z-constants-host-idle | 2026-11-07 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | idle | — | pass | 20261107T000928Z-constants-vulkan-idle | 2026-11-07 |
 | AMD Ryzen 7 9800X3D 8-Core Processor (RADV RAPHAEL_MENDOCINO) | AMD | vulkan | 26.2.4 | igpu | — | pass | 20261107T002608Z-constants-vulkan-igpu | 2026-11-07 |
+| — | NVIDIA | cuda | 610.57.04 | idle | — | pass | 20261107T012502Z-constants-cuda-idle | 2026-11-07 |
 
 ## file_page
 
@@ -49,6 +51,7 @@ One row per run directory under `runs/`: the device the probe declared, the stac
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | idle | 102.6 TFLOPS | pass | 20261106T232243Z-mma-vulkan-idle | 2026-11-06 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | mem80 | 105.4 TFLOPS | pass | 20261010T181504Z-mma-vulkan-mem80 | 2026-10-10 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | refxor-baseline | 101.4 TFLOPS | pass | 20261107T002441Z-mma-vulkan-refxor-baseline | 2026-11-07 |
+| NVIDIA GeForce RTX 5070 Ti | NVIDIA | cuda | 13030 | idle | 100.3 TFLOPS | pass | 20261107T012507Z-mma-cuda-idle | 2026-11-07 |
 
 ## pointer_chase
 

@@ -207,3 +207,34 @@ the Vulkan README line about the two older probes' own copies is corrected.
     records, and the soak grid run; `docs/platforms.md` regenerated at 31 runs.
   - Remaining before phase C closes: a real two-backend `crosscheck --check` verdict and the
     first CUDA-side `constants` run — both need a 5090 or the GB10.
+- 2026-11-07 — Divergence found at push time, merged; first CUDA-side runs landed on the 5070 Ti box.
+  The push was rejected: the remote branch carried 9 commits from the 5090 and GB10 machines
+  implementing much of the same roadmap (bit-exact mma via `--dump-matrix`, a platforms
+  generator, GB10 first-run + independent-review docs, `load_check` in grid manifests, a host
+  backend for the constants probe, CI removed). Merged, not rebased — those commits are the
+  user's own work. Ten conflicts, resolved as:
+  - mma: both cross-backend mechanisms kept — in-run `ref_xor` records (fp16/bf16/int8, the
+    `n*3` pattern) *and* `--dump-matrix` JSON dumps for external file comparison; the
+    fp32-exactness iteration cap (past ~262k iters want*iters overflows the fp32 exact-integer
+    range) kept in both backends.
+  - platforms: the per-run generator (canonical tag mapping) kept. The other side's generator
+    was written to the 5090-era record names (`mma_throughput`, hostname as platform) and could
+    not reproduce the current corpus; its committed 5090-row platforms.md stays in git history.
+  - CLI: `crosscheck` keeps both `--check` (tolerances + ref_xor) and `--bitexact` (dumps);
+    the duplicated `platforms` subparser collapsed to one.
+  - `test_constants.py` split by family (GPU vs host) — colliding helper class names would
+    have silently dropped one side's tests.
+  - **Post-merge defect found by running, not reviewing:** the host constants probe (October
+    code) was written against the pre-S3 `env/amdgpu` API — it crashed on AMD and reported
+    "no GPU sources." Fixed: `dpm_table` now returns `{"states": {level: MHz}, ...}`; KFD nodes
+    join their card's bucket via the topology `device_id` (the two kernel views of one GPU now
+    actually compare); a >4x memory spread is a UMA carve-out (different quantities, a note,
+    not a failure); vulkaninfo is matched on `deviceID` (a PCI ID is not a name — the old code
+    compared `0x7550` against "AMD Radeon RX 9070 XT"); `probe_end` now carries `failed_checks`
+    per the record-format contract. Eight regression tests.
+  - The 5070 Ti box (sm_120a, CUDA 13.3): `constants` ok — API facts agree with
+    `/proc/driver/nvidia` (70 SMs, 2452 MHz, 15.5 GiB); `mma` fp16 100.3 / bf16 25.1 /
+    int8 200.7 TFLOPS. The fp16/bf16/int8 `ref_xor` checksums are **all 0x2 — exactly the AMD
+    backend's values**: CUDA WMMA and Vulkan cooperative-matrix, same `n*3` pattern, first
+    cross-architecture agreement of the checksum records. The remaining phase-C item is now
+    only the two-backend `--check` verdict (one machine, two drivers).

@@ -9,6 +9,11 @@
 // result is checked element-wise against a host reference computed in exact arithmetic, so a
 // mis-encoded operand layout fails loudly instead of posting a plausible throughput.
 //
+// Cross-backend bit-exactness has two data paths: the per-format ref_xor records (an in-run
+// checksum of the base tile, compared by `crosscheck --check`), and `--dump-matrix PATH`, which
+// writes the logical A/B matrices and the raw result words to PATH.<fmt>.json for external
+// file comparison across machines.
+//
 // fp4 needs a family-specific build target (compute_120a/compute_121a, i.e. the 'a' targets):
 // kind::f8f6f4 is not in plain compute_120/121, and the probe reports fp4 as not built rather
 // than guessing. All Blackwell GPUs (sm_120a consumer, sm_121a GB10) have the fp4 MMA.
@@ -18,6 +23,9 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <mma.h>
@@ -33,17 +41,19 @@ struct Options {
     double seconds      = 0.5; // target duration of one throughput series
     std::string formats = "fp16,bf16,tf32,int8,fp8,fp4";
     int blocks_per_sm   = 8;
+    std::string dump_matrix;           // cross-backend bit-exact comparison: dump A/B/D per format
 };
 
 Options parse(int argc, char** argv) {
     Args args(argc, argv,
               "usage: mma [--seconds S (0.5)] [--formats fp16,bf16,tf32,int8,fp8,fp4] "
-              "[--blocks-per-sm N (8)]");
+              "[--blocks-per-sm N (8)] [--dump-matrix PATH]");
     Options o;
     for (std::string a; args.next(a);) {
         if (a == "--seconds") { o.seconds = std::stod(args.value(a)); }
         else if (a == "--formats") { o.formats = args.value(a); }
         else if (a == "--blocks-per-sm") { o.blocks_per_sm = std::stoi(args.value(a)); }
+        else if (a == "--dump-matrix") { o.dump_matrix = args.value(a); }
         else { args.usage_error("unknown argument " + a); }
     }
     if (o.seconds <= 0 || o.blocks_per_sm <= 0) { args.usage_error("values must be positive"); }
@@ -103,6 +113,28 @@ bool matrix_ok_int(const int* got, const std::vector<double>& want, Obj* detail)
         }
     }
     return true;
+}
+
+// One dump file for the cross-backend bit-exact comparison: the logical A and B matrices (the
+// values both backends multiply) and the raw result words, so the comparison never re-parses
+// floats. `dwords` holds the raw 32-bit result words (float bits for fp formats, int bits for
+// int8); A and B are the exact integers the format's fill used, in logical (m,k)/(k,n) order.
+void dump_matrix_file(const std::string& path, const std::string& tag, const std::string& backend,
+                      const std::vector<double>& A, const std::vector<double>& B,
+                      const std::vector<std::uint32_t>& dwords) {
+    std::ofstream out(path + "." + tag + ".json");
+    out << "{\"format\": \"" << tag << "\", \"backend\": \"" << backend << "\",\n";
+    out << " \"A\": [";
+    for (std::size_t i = 0; i < A.size(); ++i) { out << (i ? ", " : "") << A[i]; }
+    out << "],\n \"B\": [";
+    for (std::size_t i = 0; i < B.size(); ++i) { out << (i ? ", " : "") << B[i]; }
+    out << "],\n \"D\": [";
+    for (std::size_t i = 0; i < dwords.size(); ++i) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "\"%08x\"", dwords[i]);
+        out << (i ? ", " : "") << buf;
+    }
+    out << "]}\n";
 }
 
 // ref_xor: the cross-backend checksum of the base tile. The 16x8 region (the left half of a
@@ -357,8 +389,11 @@ SeriesResult timed_series(cudaStream_t stream, const std::function<void(int)>& l
     EL_CUDA(cudaEventSynchronize(t1));
     float warm_ms = 0;
     EL_CUDA(cudaEventElapsedTime(&warm_ms, t0, t1));
+    // The throughput oracle requires want*iters to be exact in the accumulator: an fp32
+    // accumulator is exact to 2^24 and want <= 64, so past ~262k iterations the check would fail
+    // on rounding, not on hardware. Cap there (s32 could go higher; one cap keeps it simple).
     const int iters = std::clamp(static_cast<int>(seconds * 1000.0 / std::max(warm_ms, 0.001f)),
-                                 4096, 4000000);
+                                 4096, 200000);
 
     std::vector<double> per;
     int bad = 0;
@@ -439,6 +474,19 @@ int main(int argc, char** argv) {
         const bool matrix_pass = matrix_ok(got.data(), ref, &detail);
         check(fmt + ".matrix", matrix_pass, detail);
         ref_xor_check(fmt, matrix_pass, ref, 16); // 16x16 tile: checksum the left 16x8 half
+        if (!o.dump_matrix.empty()) {
+            std::vector<double> A(256), B(256);
+            for (int m = 0; m < 16; ++m) {
+                for (int k = 0; k < 16; ++k) { A[std::size_t(m) * 16 + k] = a_shared(m, k); }
+            }
+            for (int k = 0; k < 16; ++k) {
+                for (int n = 0; n < 16; ++n) { B[std::size_t(k) * 16 + n] = b_shared(k, n); }
+            }
+            std::vector<std::uint32_t> words(256);
+            static_assert(sizeof(float) == sizeof(std::uint32_t));
+            std::memcpy(words.data(), got.data(), 256 * sizeof(float));
+            dump_matrix_file(o.dump_matrix, fmt, "cuda", A, B, words);
+        }
 
         float* out = nullptr;
         EL_CUDA(cudaMalloc(&out, warps * kChains * 256 * sizeof(float)));
@@ -617,6 +665,19 @@ int main(int argc, char** argv) {
         const bool matrix_pass = matrix_ok_int(got.data(), ref, &detail);
         check(fmt + ".matrix", matrix_pass, detail);
         ref_xor_check(fmt, matrix_pass, ref, 16); // 16x16 tile: checksum the left 16x8 half
+        if (!o.dump_matrix.empty()) {
+            std::vector<double> A(256), B(256);
+            for (int m = 0; m < 16; ++m) {
+                for (int k = 0; k < 16; ++k) { A[std::size_t(m) * 16 + k] = a_shared(m, k); }
+            }
+            for (int k = 0; k < 16; ++k) {
+                for (int n = 0; n < 16; ++n) { B[std::size_t(k) * 16 + n] = b_shared(k, n); }
+            }
+            std::vector<std::uint32_t> words(256);
+            static_assert(sizeof(int) == sizeof(std::uint32_t));
+            std::memcpy(words.data(), got.data(), 256 * sizeof(int));
+            dump_matrix_file(o.dump_matrix, fmt, "cuda", A, B, words);
+        }
 
         int* out = nullptr;
         EL_CUDA(cudaMalloc(&out, warps * kChains * 256 * sizeof(int)));

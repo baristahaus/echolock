@@ -13,6 +13,8 @@ from pathlib import Path
 from report.markdown import RunData
 from report.tags import run_metrics
 
+ROOT = Path(__file__).resolve().parents[1]
+
 # The headline metric per probe: the number the probe exists to report, by canonical key
 # (first present wins when a run used non-default parameters).
 #
@@ -153,3 +155,27 @@ def generate(run_root: Path, out_path: Path) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render_markdown(rows))
     return len(rows)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry: `platforms [RUN_DIR...] [--out PATH]`; no args = every run under runs/."""
+    import argparse
+
+    p = argparse.ArgumentParser(prog="platforms",
+                                description="docs/platforms.md: one row per run directory")
+    p.add_argument("runs", nargs="*", help="run directories; default: every run under runs/")
+    p.add_argument("--out", default=None, help="output file (default docs/platforms.md)")
+    a = p.parse_args(argv)
+    out = Path(a.out) if a.out else ROOT / "docs" / "platforms.md"
+    rows: list[dict] = []
+    if a.runs:
+        for d in a.runs:
+            row = run_row(RunData(Path(d)))
+            if row:
+                rows.append(row)
+    else:
+        rows = run_rows(ROOT / "runs")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_markdown(rows))
+    print(f"{out} ({len(rows)} runs)")
+    return 0

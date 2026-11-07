@@ -75,17 +75,73 @@ directories, so the verdict is data the report can render.
   across backends is closed: `report/tags.py` maps (probe, metric, tags) from each backend to
   one canonical key (explicit per probe x backend, built from the probe sources and the
   records under runs/); `diff`, `regress` and the phase-3 check all compare on it.
-- [ ] Phase 2: constants probe
-- [x] Phase 3 (implementation): `crosscheck --check` applies the invariants — memory
-  device-local gpu_read and h2d copy_payload within 10 %; pointer_chase smallest- and
-  largest-footprint device hop latency within 15 %; mma fp16/bf16/int8 ceilings within 20 %;
-  mma bit-exactness by comparing the backends' `ref_xor` checksum detail strings exactly
-  (absent checksums are verdict "missing" with the reason, never a pass). Tolerances are named
-  in `report/diff.py` (`CROSSCHECK_TOL`) and recorded in the `crosscheck` records
-  (`crosscheck.jsonl` in both run dirs, section in crosscheck-report.md). Caveat: the check
-  logic is unit-tested on synthetic two-backend run directories; its first real two-backend
-  verdict needs a machine with both backends on one GPU — none here (no NVIDIA), so the first
-  real run happens on the 5090 or the GB10.
-- [x] Phase 4 (generator): `./echolock platforms` generates docs/platforms.md from the run
-  corpus (one table per probe, one row per run, deterministic order). Data is partial: this
-  box's runs only — the RTX 5090 and GB10 fill the same tables as their runs land.
+- [x] Phase 2: constants probe. Host backend: NVML / nvidia-smi / proc-information / amdgpu
+  sysfs / KFD / vulkaninfo sources compared per device fact (a GB10-cluster review found it
+  reporting `ok` having compared nothing — four silent key mismatches, fixed with a fixture
+  test built from real `nvidia-smi` output). CUDA and Vulkan probes: API facts cross-checked
+  against kernel sysfs, with the L2 band and per-SM clock derived sources from
+  `--against RUN_DIR`; verified on the RX 9070 XT and the Raphael iGPU (the iGPU's UMA memory
+  "sources" measure different quantities, so that check is a recorded finding, not a false
+  failure) and on the RTX 5070 Ti.
+- [x] Phase 3: cross-stack alignment with tolerance verdicts, two data paths.
+  `crosscheck --check` (`report/diff.py`): memory device-local gpu_read and h2d copy_payload
+  within 10 %; pointer_chase smallest- and largest-footprint device hop latency within 15 %;
+  mma fp16/bf16/int8 ceilings within 20 %; mma bit-exactness by comparing the backends'
+  `ref_xor` checksum detail strings exactly (absent checksums are verdict "missing" with the
+  reason, never a pass). Tolerances are named in `CROSSCHECK_TOL` and recorded in the
+  `crosscheck` records (`crosscheck.jsonl` in both run dirs, section in crosscheck-report.md).
+  `crosscheck --bitexact`: both probes dump operand and result matrices (`--dump-matrix`) and
+  every result word must match; fp16 is BIT-EXACT across CUDA and Vulkan cooperative-matrix on
+  the RTX 5090. int8 bit-exact is impossible on that GPU: NVIDIA's cooperative matrix lists no
+  M16N16K16 int8 config (AMD's does) — itself a platform finding. The bit-exact work also
+  exposed and fixed an oracle limit: past ~262k iterations want*iters exceeds the fp32
+  exact-integer range, so the exact throughput check would fail on rounding; iteration counts
+  are now capped in both backends. (Earlier note: the "Vulkan mma/sync fail on NVIDIA" finding
+  was device selection — the Vulkan probes defaulted to the RADV iGPU on that hybrid machine;
+  they now take --device and pass on the 5090.) The `ref_xor` record work on this box also
+  found the old shared mma operand pattern degenerate (n*5 vanishes mod 5: every tile row
+  constant, the 16x8 XOR structurally zero) — fixed in both backends (n*3).
+- [x] Phase 4: `./echolock platforms` -> docs/platforms.md, regenerated from run directories
+  (one table per probe, one row per run, deterministic order; headline metrics via the
+  canonical tag mapping).
+- [x] Load-condition invariance: every grid condition run records a `load_check` in the manifest
+  (requested vs the generator's self-reported achieved, plus a sampler view that must show at
+  least the target); the report flags a run whose load was not what its label says. The check
+  caught two real issues on its first version: loadavg cannot validate a 10 s run (the sampler
+  now derives a per-sample cpu_busy_frac from /proc/stat deltas), and the sampler's view
+  includes the probe's own work, so it bounds the ambient load from below only. The
+  `soak`/`soakN` condition (thermal plateau, achieved duty in load.jsonl) is the same family:
+  the load is what the machine's own counters report, not what the label says.
+## Next (the one candidate left) -- blocked on ONE driver, works on GB10
+
+- File-backed GPU reads: NVIDIA CUDA can import file-backed host memory; AMD Vulkan cannot
+  (backends/vulkan/README.md). One workload, two genuinely different mechanisms; the residency
+  model is file_page's.
+- Feasibility tested on this machine (RTX 5090, open kernel module 615.71.09): the GPU can read
+  registered host memory and the XOR oracle works, but `cudaHostRegister` REJECTS file-backed
+  pages -- MAP_SHARED and MAP_PRIVATE mappings of a real file both fail with
+  cudaErrorInvalidArgument, while anonymous malloc and anonymous mmap register fine (control
+  tested). The probe is blocked on the driver accepting file-backed registration.
+- **Re-tested on GB10 as requested (Asus GX10, sm_121a, open kernel module 580.173.02, ext4 on
+  NVMe): it is not blocked here.** `cudaHostRegister` accepted file-backed pages in every variant
+  tried -- MAP_SHARED and MAP_PRIVATE, `PROT_READ|PROT_WRITE` and `PROT_READ` only, flags 0 and
+  `cudaHostRegisterMapped` -- and the anonymous control also passed, so nothing about the harness
+  is doing the work. Register success alone is not the evidence; the device then read 8 MiB through
+  the registered file-backed pointer and a checksum over it matched the host-written pattern
+  exactly (1,069,547,520 = 1,069,547,520), for both flag settings. Unregistered file-backed reads
+  also work through the second-level page tables (`cudaMemcpy` from a `MAP_SHARED` file mapping
+  succeeds), and `file_page --phase res-seq` on this box measures that path at 163.8 GB/s with
+  `page_cache_resident` 1.0 on a 2 GiB file.
+- So the block is **specific to the 5090 / 615.71.09 pair**, not a CUDA-wide rule, and a CUDA
+  `gpu_read` phase is viable on this platform rather than needing a staging copy. Two caveats
+  before designing on it. (1) Fault state is still untested: `mincore` reports *page-cache*
+  residency, not the mapping's fault state, so my seven variants all measured 16384/16384 resident
+  and none of them was genuinely unfaulted -- settling it means evicting between map and register,
+  which on a node with a resident engine means doing it somewhere else. (2) I did not reproduce
+  their exact conditions (5090 geometry, their file's filesystem, hugepages, `O_DIRECT`), so this
+  is "works on GB10/580", not "the 5090 report was wrong". The check is a standalone ~60-line
+  binary, not a repo artifact: map a file, write a pattern through the mapping, register, get the
+  device pointer, checksum from a kernel, compare -- and print unbuffered, because a probe that
+  segfaults with buffered stdout takes its own diagnosis with it (docs/lessons.md item 8). The
+  three variants used here, with their output, are kept outside the repo at
+  `~/echolock-runs-gb10-20261010/repros/` alongside the run records.

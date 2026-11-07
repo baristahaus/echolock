@@ -35,7 +35,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -50,16 +52,21 @@ struct Options {
     double seconds = 0.5;
     std::string formats = "fp16,bf16,int8";
     unsigned workgroups = 512;
+    int device = 0;
+    std::string dump_matrix;
 };
 
 Options parse(int argc, char** argv) {
     Args args(argc, argv,
-              "usage: mma [--seconds S (0.5)] [--formats fp16,bf16,int8] [--workgroups N (512)]");
+              "usage: mma [--seconds S (0.5)] [--formats fp16,bf16,int8] [--workgroups N (512)] "
+              "[--device N (0)] [--dump-matrix PATH]");
     Options o;
     for (std::string a; args.next(a);) {
         if (a == "--seconds") { o.seconds = std::stod(args.value(a)); }
         else if (a == "--formats") { o.formats = args.value(a); }
         else if (a == "--workgroups") { o.workgroups = std::stoul(args.value(a)); }
+        else if (a == "--device") { o.device = std::stoi(args.value(a)); }
+        else if (a == "--dump-matrix") { o.dump_matrix = args.value(a); }
         else { args.usage_error("unknown argument " + a); }
     }
     if (o.seconds <= 0 || o.workgroups == 0) { args.usage_error("values must be positive"); }
@@ -209,7 +216,7 @@ int main(int argc, char** argv) {
     mm.vulkanMemoryModel = VK_TRUE;
     stor8.pNext = &mm;
 
-    VkCtx ctx("mma", 0,
+    VkCtx ctx("mma", o.device,
               Obj().num("seconds", o.seconds).str("formats", o.formats)
                   .integer("chains", kChains).integer("workgroups", o.workgroups),
               {"VK_KHR_cooperative_matrix", "VK_KHR_vulkan_memory_model",
@@ -397,6 +404,38 @@ int main(int argc, char** argv) {
             const bool ok = verify_slot == nonce && check_c(1, 1, 1.0, d); // one MulAdd
             check(tag + ".matrix", ok, d);
             ref_xor_check(tag, ok, want, 16); // 16x16 tile: checksum the left 16x8 half
+
+            // Optional operand/result dump for the cross-backend bit-exact comparison. One file
+            // per format: the logical A and B matrices (the values both backends multiply) and
+            // the raw result words. A and B are the shared integers for every format here.
+            if (!o.dump_matrix.empty()) {
+                std::vector<double> A(256), B(256);
+                for (int m = 0; m < 16; ++m) {
+                    for (int k = 0; k < 16; ++k) { A[std::size_t(m) * 16 + k] = a_pattern(m, k); }
+                }
+                for (int k = 0; k < 16; ++k) {
+                    for (int n = 0; n < 16; ++n) { B[std::size_t(k) * 16 + n] = b_pattern(k, n); }
+                }
+                std::vector<std::string> D;
+                D.reserve(256);
+                for (std::size_t i = 0; i < 256; ++i) {
+                    const std::uint32_t word = f.is_float
+                        ? (*reinterpret_cast<const std::uint32_t*>(static_cast<const float*>(c.mapped) + i))
+                        : std::uint32_t(static_cast<const std::int32_t*>(c.mapped)[i]);
+                    char buf[16];
+                    std::snprintf(buf, sizeof(buf), "%08x", word);
+                    D.emplace_back(buf);
+                }
+                std::ofstream out(o.dump_matrix + "." + tag + ".json");
+                out << "{\"format\": \"" << tag << "\", \"backend\": \"vulkan\",\n";
+                out << " \"A\": [";
+                for (std::size_t i = 0; i < A.size(); ++i) { out << (i ? ", " : "") << A[i]; }
+                out << "],\n \"B\": [";
+                for (std::size_t i = 0; i < B.size(); ++i) { out << (i ? ", " : "") << B[i]; }
+                out << "],\n \"D\": [";
+                for (std::size_t i = 0; i < D.size(); ++i) { out << (i ? ", " : "") << "\"" << D[i] << "\""; }
+                out << "]}\n";
+            }
         }
 
         // ---- throughput series -----------------------------------------------------------------
@@ -408,8 +447,12 @@ int main(int argc, char** argv) {
         double warm = 1e30;
         for (int i = 0; i < 3; ++i) { warm = std::min(warm, run_timed(1000, rep_nonce(-2))); }
         const double iters_target = o.seconds * 1e6 / std::max(1.0, warm / 1000.0);
+        // The throughput oracle requires want*iters to be exact in the accumulator. An fp32
+        // accumulator is exact to 2^24, and want <= 64, so past ~262k iterations the check would
+        // fail on rounding, not on hardware. Cap float formats there; s32 has no such limit.
+        const std::uint32_t iters_cap = f.is_float ? 200000u : 50000000u;
         const std::uint32_t iters =
-            std::uint32_t(std::max(1.0, std::min(5e7, std::round(iters_target))));
+            std::uint32_t(std::max(1.0, std::min(double(iters_cap), std::min(5e7, std::round(iters_target)))));
         std::vector<double> tflops;
         bool all_ok = true;
         for (long long rep = 0;; ++rep) {
