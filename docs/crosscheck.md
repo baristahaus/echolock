@@ -112,6 +112,48 @@ directories, so the verdict is data the report can render.
   includes the probe's own work, so it bounds the ambient load from below only. The
   `soak`/`soakN` condition (thermal plateau, achieved duty in load.jsonl) is the same family:
   the load is what the machine's own counters report, not what the label says.
+- [x] Split run (cross-machine, cross-architecture): 9070 XT vulkan vs 5070 Ti cuda, same
+  probes/args — fp16 and int8 mma dumps **bit-exact across architectures** (identical operands,
+  identical result words, identical tile order), all three ref_xor checksums equal; the
+  tolerance checks read as the platform gap (hop latency 67 vs 232 ns at 64 KiB; tensor
+  ceilings within 14 %). Not the phase-3 verdict — see the section above.
+## Split run (2026-11-07): one probe, two machines, two backends
+
+The same probe, same arguments, idle, run on the two boxes in parallel — Vulkan/RADV on the
+RX 9070 XT and CUDA on the RTX 5070 Ti (with an idle co-resident vLLM engine,
+0 % util) — then compared with the same verdict functions `crosscheck --check` uses. The
+tolerance invariants were written for two drivers on ONE GPU, so a divergence here measures
+the platform gap, not a driver defect; the checksum and bit-exact checks are the
+architecture-independent ones.
+
+| check | 9070 XT (vulkan) | 5070 Ti (cuda) | verdict (same-GPU tolerance) |
+|---|---|---|---|
+| memory gpu_read, device-local (GB/s) | 633.9 | 846.2 | diverges +33.5 % |
+| memory h2d, host-visible (GB/s) | 44.95 | 28.92 | diverges -35.7 % |
+| pointer_chase hop, 64 KiB random (ns) | 232.2 | 67.11 | diverges -71.1 % |
+| pointer_chase hop, 64 MiB seq (ns) | 249.6 | 129.3 | diverges -48.2 % |
+| mma fp16 (TFLOPS) | 88.15 | 100.1 | within 20 % (+13.5 %) |
+| mma bf16 (TFLOPS) | 100.6 | 100.0 | within 20 % (-0.6 %) |
+| mma int8 (TFLOPS) | 198.7 | 199.8 | within 20 % (+0.55 %) |
+| mma ref_xor checksums | 3 | 3 | **agrees** (0x2 each format) |
+| mma dump, fp16 (256 words) | — | — | **bit-exact**, operands identical |
+| mma dump, int8 (256 words) | — | — | **bit-exact**, operands identical |
+
+Two findings. First, the cross-architecture bit-exact result: CUDA (WMMA/PTX) and Vulkan
+cooperative-matrix on genuinely different silicon produced *identical* fp16 and int8 result
+words for the same operands — the m16n16k16 accumulation is order-identical in practice, not
+merely close. bf16 has no comparable dump: the backends use different tiles (CUDA
+m16n8k16, RADV m16n16k16), so bf16's cross-architecture evidence stays the matching ref_xor
+checksum. Second, the platform gap the tolerances surface: the 5070 Ti's dependent-load hop
+latency is ~3.5x lower at the smallest footprint (67 ns vs 232 ns) and ~2x at the
+L2-exceeding one, while its tensor ceilings sit within ~14 % of the 9070 XT's across all
+three formats.
+
+This is not the phase-3 verdict: that still needs one GPU with two drivers. What it does
+close is the "do the checksum and dump contracts hold across architectures" question — yes,
+they hold, including the layout: the word-by-word dump comparison found the two backends
+store the tile in the same order.
+
 ## Next (the one candidate left) -- blocked on ONE driver, works on GB10
 
 - File-backed GPU reads: NVIDIA CUDA can import file-backed host memory; AMD Vulkan cannot

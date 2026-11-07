@@ -37,8 +37,10 @@ One row per run directory under `runs/`: the device the probe declared, the stac
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | cpu50 | 631.6 GB/s | pass | 20261010T181239Z-memory-vulkan-cpu50 | 2026-10-10 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | idle | 632.5 GB/s | pass | 20261010T181229Z-memory-vulkan-idle | 2026-10-10 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | idle | 619.7 GB/s | pass | 20261106T232156Z-memory-vulkan-idle | 2026-11-06 |
+| AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | idle | 633.9 GB/s | pass | 20261107T023324Z-memory-vulkan-idle | 2026-11-07 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | io500 | 632.9 GB/s | pass | 20261010T181308Z-memory-vulkan-io500 | 2026-10-10 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | mem80 | 623.9 GB/s | pass | 20261010T181251Z-memory-vulkan-mem80 | 2026-10-10 |
+| NVIDIA GeForce RTX 5070 Ti | NVIDIA | cuda | 13030 | idle | 846.2 GB/s | pass | 20261107T023148Z-memory-cuda-idle | 2026-11-07 |
 
 ## mma
 
@@ -49,9 +51,11 @@ One row per run directory under `runs/`: the device the probe declared, the stac
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | first-verified | 102.8 TFLOPS | pass | 20261010T180443Z-mma-vulkan-first-verified | 2026-10-10 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | idle | 93.3 TFLOPS | pass | 20261010T181406Z-mma-vulkan-idle | 2026-10-10 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | idle | 102.6 TFLOPS | pass | 20261106T232243Z-mma-vulkan-idle | 2026-11-06 |
+| AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | idle | 88.2 TFLOPS | pass | 20261107T023229Z-mma-vulkan-idle | 2026-11-07 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | mem80 | 105.4 TFLOPS | pass | 20261010T181504Z-mma-vulkan-mem80 | 2026-10-10 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | refxor-baseline | 101.4 TFLOPS | pass | 20261107T002441Z-mma-vulkan-refxor-baseline | 2026-11-07 |
 | NVIDIA GeForce RTX 5070 Ti | NVIDIA | cuda | 13030 | idle | 100.3 TFLOPS | pass | 20261107T012507Z-mma-cuda-idle | 2026-11-07 |
+| NVIDIA GeForce RTX 5070 Ti | NVIDIA | cuda | 13030 | idle | 100.1 TFLOPS | pass | 20261107T023210Z-mma-cuda-idle | 2026-11-07 |
 
 ## pointer_chase
 
@@ -62,9 +66,11 @@ One row per run directory under `runs/`: the device the probe declared, the stac
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | — | cpu50 | 333.4 ns/hop | pass | 20261010T181333Z-pointer_chase-vulkan-cpu50 | 2026-10-10 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | — | idle | 252.3 ns/hop | pass | 20261010T181327Z-pointer_chase-vulkan-idle | 2026-10-10 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | idle | 329.3 ns/hop | pass | 20261106T232238Z-pointer_chase-vulkan-idle | 2026-11-06 |
+| AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | idle | 236.8 ns/hop | pass | 20261107T023224Z-pointer_chase-vulkan-idle | 2026-11-07 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | — | io500 | 252.6 ns/hop | pass | 20261010T181352Z-pointer_chase-vulkan-io500 | 2026-10-10 |
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | — | mem80 | 252.4 ns/hop | pass | 20261010T181340Z-pointer_chase-vulkan-mem80 | 2026-10-10 |
 | — | AMD | vulkan | — | amd-baseline | — | error | 20261010T180711Z-pointer_chase-vulkan-amd-baseline | 2026-10-10 |
+| NVIDIA GeForce RTX 5070 Ti | NVIDIA | cuda | 13030 | idle | 128.6 ns/hop | pass | 20261107T023203Z-pointer_chase-cuda-idle | 2026-11-07 |
 
 ## sync
 
