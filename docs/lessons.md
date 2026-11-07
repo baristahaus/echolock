@@ -194,3 +194,34 @@ contract instead of reading it.
 - Broken run directories are not just clutter: `test_every_real_run_dir_validates` lints
   every directory under `runs/`, so a half-written or argument-error run fails the suite
   until it is removed or fixed.
+
+## 12. The repo carries no internal network data — ever
+
+The machine name of the CUDA test box was pushed to the remote in four docs (found
+2026-11-07, after the user's rule was stated: never add data or information from our own
+network — names, IPs, etc. — to the repo). The fix was a history rewrite, not a follow-up
+commit: a later commit leaves the string in every earlier tree, and `git log -S` finds it
+forever.
+
+**What happened.** The name appeared in README.md, docs/crosscheck.md, docs/roadmap.md and
+the plan-phase-ab process log, in three commits, all pushed. `git filter-repo
+--replace-text` was the wrong tool here: it rewrites the whole history and strips commit
+signatures by default, so every commit hash in the repo changed — including the user's
+nine commits on this branch, which invalidates checkouts on the other machines.
+`git filter-branch --tree-filter` scoped to the range that actually contains the string
+(`62d57f8..HEAD`) only rewrote the three commits whose trees matched; every other commit
+kept its exact hash (verified: the pre-existing chain is reachable unchanged), so the
+other machines' checkouts stay valid.
+
+**Rules.**
+- No machine names, hostnames, IPs, usernames, or LAN addresses in any tracked file or
+  commit message — including process logs and "environment" sections that look like
+  harmless context. Describe hardware by what it is (GPU model, architecture), not by
+  what it's called on the network.
+- Local is fine: this repo's own `runs/` corpus, the beads database, and personal notes
+  outside the repo may carry any of it. The boundary is `git push`.
+- When scrubbing pushed history: scope the rewrite to the commits that contain the string
+  (filter-branch with a range) and verify the commits you must not touch keep their hashes;
+  a full-history rewriter changes every hash and desyncs every other checkout.
+- A force-push removes the string from the branch, but GitHub keeps the old commit objects
+  as dangling objects for some time; for a public repo, full purge is a repo-admin action.
