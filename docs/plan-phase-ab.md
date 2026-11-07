@@ -238,3 +238,21 @@ the Vulkan README line about the two older probes' own copies is corrected.
     backend's values**: CUDA WMMA and Vulkan cooperative-matrix, same `n*3` pattern, first
     cross-architecture agreement of the checksum records. The remaining phase-C item is now
     only the two-backend `--check` verdict (one machine, two drivers).
+- 2026-11-07 — Split crosscheck (user: both machines granted, "do split testing if you can").
+  memory/pointer_chase/mma run in parallel — Vulkan on the 9070 XT, CUDA on the 5070 Ti
+  (around an idle co-resident vLLM, 0.5 GiB ceiling instead of killing it) — then compared
+  with the same `crosscheck_verdicts` + `compare_dumps` functions the CLI uses. Findings:
+  - **fp16 and int8 matrix dumps are bit-exact across architectures** — 0/256 result words
+    differ, operands identical, tile storage order identical. The m16n16k16 accumulation is
+    order-identical in practice on RDNA4 vs GB202. bf16 has no comparable dump (CUDA
+    m16n8k16 vs RADV m16n16k16 tiles — filed echolock-0mq); its evidence is the equal
+    ref_xor.
+  - The tolerance checks read as the platform gap, not driver defects: dependent-load hop
+    latency 67.1 vs 232.2 ns (64 KiB random), gpu_read 846 vs 634 GB/s; mma ceilings within
+    14 % across formats. Documented in crosscheck.md "Split run".
+  - Two process lessons recorded (lessons.md 10-11): the merge's green suite did not cover
+    the host probe's stale env/amdgpu expectations (a consumer re-run on hardware is the
+    check); and the probe CLI is per-backend (CUDA `--gib` vs Vulkan `--mib`) — the split
+    run's first Vulkan memory run died on an unknown argument, diagnosed from stderr.log,
+    with the broken run dir failing the record lint until removed.
+  - Corpus: 6 new runs (40 in platforms.md); beads 3bb closed, 74k updated, 0mq filed.

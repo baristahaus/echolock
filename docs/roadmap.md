@@ -108,17 +108,22 @@ Done 2026-11-06/07, executed per [plan-phase-ab.md](plan-phase-ab.md).
       gates every later vendor. Verified on the 9070 XT and the Raphael iGPU (all agreement
       checks pass; the iGPU's memory "sources" measure different quantities on UMA — heaps and
       KFD size the host pool, the DRM value is the carve-out — so that check is deliberately
-      absent and recorded as a finding in the run). CUDA side compile-checked for sm_121a/
-      sm_120a/sm_90; first real run awaits a 5090 or the GB10.
+      absent and recorded as a finding in the run). CUDA side ran first on the RTX 5070 Ti
+      (sm_120a): API facts agree with `/proc/driver/nvidia` (70 SMs, 2452 MHz,
+      15.5 GiB); the host backend (NVML/nvidia-smi/proc/amdgpu/KFD/vulkaninfo) is verified on
+      the 9070 XT + iGPU box, after the env/amdgpu API-drift fix (lessons.md 10).
 - [x] Equivalence suite, bit-exact mma hardware check and the cross-backend tag mapping
       (crosscheck phase 3): `crosscheck --check` with documented tolerances, `report/tags.py`
       mapping, and the mma `ref_xor` records that make "fp16/bf16/int8 are bit-exact" a
       comparison of data. The first real two-backend verdict still needs a machine with both
       backends — none here. (The work also found the old shared mma operand pattern was
       degenerate — every tile row constant, so the cross-backend checksum would have been
-      structurally zero; it is fixed in both backends, see docs/lessons.md.)
+      structurally zero; it is fixed in both backends, see docs/lessons.md.) The split
+      cross-machine run (9070 XT vulkan vs 5070 Ti cuda) confirmed the contracts hold across
+      architectures: fp16 and int8 dumps bit-exact, all three ref_xor checksums equal, tile
+      order identical (docs/crosscheck.md, "Split run").
 - [x] `platforms.md` generator (crosscheck phase 4); data fills in as runs happen
-      (`docs/platforms.md`, 31 runs and counting).
+      (`docs/platforms.md`, 40 runs and counting: 9070 XT + iGPU vulkan/host, 5070 Ti cuda).
 - [x] Record-format lint: `report/records.py` validates every record type, stream rules, and
       every real run directory; CI rejects malformed records.
 - [x] Thermal-soak grid condition: `soak`/`soakN` heats every source the machine offers,
@@ -129,8 +134,9 @@ Done 2026-11-06/07, executed per [plan-phase-ab.md](plan-phase-ab.md).
       (gfx10.3 and gfx12 tables from the amdgpu driver, `EDC_CPU` decoded on the iGPU),
       `gpu_metrics` family-2 (v2.1) layout with the iGPU now decoding and cross-checking.
 
-Acceptance: `constants` passes on the 9070 XT and the iGPU; CI rejects a malformed record;
-the CUDA-vs-Vulkan verdict row lands on the first two-backend machine (phase C).
+Acceptance: `constants` passes on the 9070 XT, the iGPU and the RTX 5070 Ti; CI rejects a
+malformed record; the CUDA-vs-Vulkan verdict row lands on the first two-backend machine
+(phase C).
 
 ### Phase B — corpus tooling
 

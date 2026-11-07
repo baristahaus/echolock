@@ -113,7 +113,7 @@ low nibble) both produced negative sums that looked like fragment mis-mapping. A
 silently drops the family suffix just like sm_121a does — always use explicit
 `-gencode arch=compute_120a,code=sm_120a`.
 
-## 8. Control-test the rejection before designing around it (2026-10, file-backed GPU reads)
+## 9. Control-test the rejection before designing around it (2026-10, file-backed GPU reads)
 
 The file-backed GPU-read probe died at `cudaHostRegister` -> cudaErrorInvalidArgument on
 file-backed mmap pages. One control test (anonymous malloc, anonymous mmap) showed registration
@@ -134,3 +134,63 @@ not a mapping's fault state, so an "unfaulted" file mapping that measures 16384/
 never unfaulted -- the fault-state question is still open (docs/crosscheck.md). The instruction in
 the original note -- re-test before designing around it -- is what kept a wrong platform-wide
 conclusion from becoming a design; keep it as procedure.
+
+## 10. A library rewrite breaks consumers that were never re-run (2026-11, host constants / env.amdgpu)
+
+**What happened.** The host constants probe (written October) called the `env/amdgpu` API the way
+it existed before the November S3 rewrite. After the rewrite, `dpm_table()` returns
+`{"states": {level: MHz}, "active": ..., "forced_level": ...}` where it used to return
+`{level: MHz}`, and `_kfd_nodes()` yields node id + `mem_banks` where it used to yield
+`node_id`/`name`/`mem`. The probe did not fail loudly: the exception was swallowed by the
+source-collection try/except and resurfaced as "no GPU sources found (no NVIDIA, no amdgpu)"
+on a machine with two AMD GPUs. The merge that brought the probe in passed 111 tests — every
+test that existed still passed — and the defect only surfaced by *running the probe on real
+hardware* after the merge.
+
+**Why it fooled us.** The API change and the probe came from different months and different
+machines; nothing at merge time knew the probe's expectations were stale. Unit tests built
+against the old shape were not written (the probe had no AMD fixture test, unlike the NVIDIA
+side, which had been forced to grow one by a GB10 review), and the failure mode — a swallowed
+exception becoming a *plausible* "no GPU here" note — reads like an environment fact, not a
+crash.
+
+**Rules.**
+- When a shared library's data shapes change (not just signatures), re-run every consumer on
+  real hardware the same day. A green test suite is not evidence the consumers are intact:
+  the suite only covers the code its tests touch.
+- A source collector that fails must not report "source absent" — collection failure and
+  source absence are different facts. The probe now records the exception as a `note` with
+  the type and message before concluding anything.
+- Fixture tests are what make API drift fail *in CI instead of on hardware*: the NVIDIA side
+  of this probe had one (built from real `nvidia-smi` output) and its schema mismatch was
+  caught by design; the AMD side did not, and its mismatch cost a real run to find. New
+  parsing code gets a fixture test from real output, not a synthetic one.
+- The fix itself had to be written against the *current* library (the tested one), never the
+  other way round: adapt the probe to `env/amdgpu`, don't regress `env/amdgpu` to what the
+  probe expects.
+
+## 11. The probe CLI is a per-backend contract, and it drifts (2026-11, split crosscheck)
+
+**What happened.** The split crosscheck ran `memory` on both machines "with the same
+arguments" — `--gib 0.5` on CUDA, which the Vulkan build rejected with `unknown argument
+--gib` (it takes `--mib`, default 256). The Vulkan run exited 2 and wrote a run directory
+whose manifest said `error` while its `probe.jsonl` held two records and no error record to
+explain why; the explanation was in `stderr.log` (`[memory] usage: memory [--mib N (256)]
+...`), a place the record-stream contract does not require the reader to look.
+
+**Why it fooled us.** The two backends were written in different months with different
+defaults (CUDA: GiB granularity; Vulkan: MiB), and nothing enforces a shared argument
+surface — `crosscheck`'s `--a-args`/`--b-args` exists precisely because per-backend
+arguments are expected to differ. Assuming one CLI for "the same probe" is assuming the
+contract instead of reading it.
+
+**Rules.**
+- Before a cross-backend (or cross-machine) batch run, read both `--help`/usage lines and
+  translate the arguments; "same probe" guarantees the same *stimulus contract* (the
+  spec.md), not the same flags.
+- A run directory with status `error` and no `error` record is not self-explanatory: the
+  contract says the explanation may be in `stderr.log` alone. When a batch produces such a
+  directory, read `stderr.log` before re-running — the usage line was the whole diagnosis.
+- Broken run directories are not just clutter: `test_every_real_run_dir_validates` lints
+  every directory under `runs/`, so a half-written or argument-error run fails the suite
+  until it is removed or fixed.
