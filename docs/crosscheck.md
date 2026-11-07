@@ -72,7 +72,20 @@ directories, so the verdict is data the report can render.
 
 - [x] Phase 1: cross-backend report columns; `crosscheck` mode (per-backend args via
   `--a-args`/`--b-args`; warns when the two runs declared different devices). Row alignment
-  across backends stays open until Phase 3 defines the tag mapping.
+  across backends is closed: `report/tags.py` maps (probe, metric, tags) from each backend to
+  one canonical key (explicit per probe x backend, built from the probe sources and the
+  records under runs/); `diff`, `regress` and the phase-3 check all compare on it.
 - [ ] Phase 2: constants probe
-- [ ] Phase 3: equivalence tolerances; bit-exact mma check
-- [ ] Phase 4: docs/platforms.md
+- [x] Phase 3 (implementation): `crosscheck --check` applies the invariants — memory
+  device-local gpu_read and h2d copy_payload within 10 %; pointer_chase smallest- and
+  largest-footprint device hop latency within 15 %; mma fp16/bf16/int8 ceilings within 20 %;
+  mma bit-exactness by comparing the backends' `ref_xor` checksum detail strings exactly
+  (absent checksums are verdict "missing" with the reason, never a pass). Tolerances are named
+  in `report/diff.py` (`CROSSCHECK_TOL`) and recorded in the `crosscheck` records
+  (`crosscheck.jsonl` in both run dirs, section in crosscheck-report.md). Caveat: the check
+  logic is unit-tested on synthetic two-backend run directories; its first real two-backend
+  verdict needs a machine with both backends on one GPU — none here (no NVIDIA), so the first
+  real run happens on the 5090 or the GB10.
+- [x] Phase 4 (generator): `./echolock platforms` generates docs/platforms.md from the run
+  corpus (one table per probe, one row per run, deterministic order). Data is partial: this
+  box's runs only — the RTX 5090 and GB10 fill the same tables as their runs land.

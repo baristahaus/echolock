@@ -20,6 +20,7 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 | 5. Vulkan backend | all six probes done and verified on AMD via RADV: memory, pointer_chase, mma (fp16/bf16/int8 bit-exact), sync, clock, file_page ([backends/vulkan/](backends/vulkan/README.md)) |
 | AMD: environment, kernel log, docs, full probe suite | done on amdgpu hardware; all six probes run on AMD via RADV and through `./echolock run` ([docs/amd.md](docs/amd.md)) |
 | NVIDIA discrete (sm_120a, RTX 5090): first real-GPU run of the CUDA backend | all six probes pass on hardware including fp4 (kind::f8f6f4, ~514 TFLOPS measured); first run exposed and fixed four probe bugs: memory copies clobbered the device fill before the contention reads, the mma D-fragment store had d1/d2 swapped, the mma fp8/fp4 `pack4` row/column addressing was wrong, and fp4's packing assumed 2 values/byte instead of the PTX kind::f8f6f4 central-4-bits byte container (plus a `declare_compiled_arch` stream-ordering race and a retry for transient calibration timeouts). fp4 needs the family build (`sm_120a`/`sm_121a`). Runs alongside a resident inference engine with small `--gib`. |
+| Roadmap phases A/B ([docs/roadmap.md](docs/roadmap.md)): constants probe, corpus tooling, soak, AMD env gaps | done on this AMD box (2026-11-06/07, [plan + log](docs/plan-phase-ab.md)): `constants` verified on the 9070 XT and the Raphael iGPU (CUDA side compile-checked, first run awaits a 5090/GB10); `suite`, `diff`/`regress`, `export`, `platforms` (31 runs), `crosscheck --check` with the mma `ref_xor` bit-exactness records (which also caught a degenerate shared mma operand pattern); `soak` grid condition; `gpu_metrics` v2.1 and per-ASIC throttle decode now cross-checked. A real two-backend equivalence verdict still needs a machine with both backends. |
 
 ## Quick start (on the GPU machine)
 
@@ -33,11 +34,17 @@ CUDA is the first backend and Vulkan compute the second. Design and principles:
 ./echolock run clock                  # derived SM clock, idle and under a memory load
 ./echolock run pointer_chase --scratch-dir /path/on/nvme
 ./echolock run mma                    # fp16/bf16/tf32/int8/fp8/fp4 tensor throughput
+./echolock run constants              # device facts from independent sources, agreement required
 ./echolock run memory --backend vulkan    # bandwidth/copies/contention via RADV (AMD)
 ./echolock run pointer_chase --backend vulkan  # GPU memory latency map
-./echolock grid memory --conditions idle,cpu50,mem80   # one run per load condition
+./echolock grid memory --conditions idle,cpu50,mem80,soak5   # one run per load condition
 ./echolock run memory -- --gib 2 --seconds 1          # after --: arguments for the probe
 ./echolock report runs/A runs/B       # several runs side by side (e.g. idle vs loaded)
+./echolock suite --backends vulkan    # every probe under each condition, one matrix report
+./echolock diff runs/A runs/B         # metric verdicts + environment delta (driver drift)
+./echolock regress runs/B             # the same, against the latest same-machine baseline
+./echolock crosscheck memory --check  # two backends, invariants asserted as data
+./echolock platforms                  # regenerate docs/platforms.md from the run corpus
 ```
 
 Utilities: `./echolock env` prints the environment snapshot, `./echolock sample` streams 1 s
@@ -77,7 +84,9 @@ run/                      plans.py (probe → process steps), runner.py (steps +
 run/                      plans.py (probe → process steps), runner.py (steps + env → run directory)
 report/                   markdown.py: declared vs measured, one column per run label
 docs/                     brief.md (design), record-format.md (JSONL schema), amd.md (AMD enablement),
-                          lessons.md (debugging lessons), crosscheck.md (cross-platform plan)
+                          lessons.md (debugging lessons), crosscheck.md (cross-platform plan),
+                          roadmap.md (longterm extension strategy), platforms.md (generated, one
+                          row per run), plan-phase-ab.md (phase A/B execution plan + process log)
 tests/                    python3 -m unittest discover -s tests -t .
 ```
 

@@ -341,24 +341,32 @@ def render(run_dirs: list[Path]) -> str:
 
     # Declared, one column per run, so a value that differs between runs (a clock under load,
     # granted flags per schedule) reads side by side like the measurements do.
-    declared_rows: dict[str, dict] = {}
+    # Two runs that share label + backend (a re-run under the same label) have the same column
+    # string; the values dict below is keyed by it, so the later run would overwrite the earlier
+    # one in every row. Disambiguate with the ordinal when the columns collide.
+    col_counts: dict[str, int] = {}
     for r in runs:
+        col_counts[r.column] = col_counts.get(r.column, 0) + 1
+    slots = [r.column if col_counts[r.column] == 1 else f"{r.column} ({i + 1})"
+             for i, r in enumerate(runs)]
+    declared_rows: dict[str, dict] = {}
+    for r, slot in zip(runs, slots):
         per_key: dict[str, list[dict]] = {}
         for d in r.of_type("declared"):
             per_key.setdefault(d.get("key", "?"), []).append(d)
         for key, ds in per_key.items():
             # One row when the run declares the key once; one row per step when it declares the
-            # same key in several steps (sync's device_flags, once per schedule).
+            # same key per step (a schedule run).
             for d in ds:
                 row_id = key if len(ds) == 1 else f"{key} [{d.get('step', '')}]"
                 row = declared_rows.setdefault(row_id, {"source": d.get("source", ""), "values": {}})
-                row["values"][r.column] = json.dumps(d.get("value"))
+                row["values"][slot] = json.dumps(d.get("value"))
     if declared_rows:
         out += ["## Declared", "",
-                "| Key | Source | " + " | ".join(r.column for r in runs) + " |",
+                "| Key | Source | " + " | ".join(slots) + " |",
                 "|---|---|" + "---|" * len(runs)]
         for rid, row in declared_rows.items():
-            cells = " | ".join(row["values"].get(r.column, "—") for r in runs)
+            cells = " | ".join(row["values"].get(s, "—") for s in slots)
             out.append(f"| {rid} | {row['source']} | {cells} |")
         out.append("")
 

@@ -3,8 +3,10 @@ run and stopped after it (milestone 4's second axis).
 
 A condition names a load and its level: "idle" (no load), "cpu50" (CPU at 50% duty), "mem80"
 (80% of RAM touched and held), "io500" (500 MB/s of file reads), "gpu50" (GPU at 50% duty via
-gpuload). Each load is its own process speaking the record protocol in load/loadlib.py: it
-writes load_start, then load_ready once it is at steady state, heartbeats, and load_end. The
+gpuload), "soak" / "soakN" (thermal soak: every heat source the machine offers, N minutes
+minimum — default 5 — plus a temperature plateau before ready). Each load is its own process
+speaking the record protocol in load/loadlib.py: it writes load_start, then load_ready once
+it is at steady state, heartbeats, and load_end. The
 runner waits for load_ready before starting the probe (a probe must not start against a
 half-filled machine), stops the load afterwards, and copies its records into the run
 directory as load.jsonl, so "50%" can be checked instead of assumed.
@@ -44,13 +46,21 @@ class GridOptions:
 
 
 def load_argv(condition: str) -> list[str] | None:
-    """A condition name to a load-generator command line; None means no load."""
+    """A condition name to a load-generator command line; None means no load.
+
+    "soak" and "soakN" (N = minutes, default 5) run the thermal soak: every heat source
+    the machine offers, until the temperature has plateaued, so the probe runs against a
+    hot-and-steady machine rather than a warming one."""
     if condition == "idle":
         return None
     m = re.fullmatch(r"(cpu|mem|io|gpu)(\d+(?:\.\d+)?)", condition)
     if m is None:
-        raise ValueError(f"unknown load condition {condition!r} "
-                         "(have: idle, cpu50, mem80, io500, gpu50)")
+        m = re.fullmatch(r"soak(?:(\d+(?:\.\d+)?))?", condition)
+        if m is None:
+            raise ValueError(f"unknown load condition {condition!r} "
+                             "(have: idle, cpu50, mem80, io500, gpu50, soak, soakN)")
+        return [sys.executable, str(LOADS / "soak.py"),
+                "--soak-min", m.group(1) or "5"]
     kind, level = m.group(1), float(m.group(2))
     if kind == "cpu":
         return [sys.executable, str(LOADS / "cpuload.py"), "--duty", str(level)]
@@ -125,7 +135,16 @@ def run_condition(condition: str, plan: Plan, opts: GridOptions,
     ready = True
     if argv is not None:
         load = LoadProcess(argv)
-        ready = load.wait_ready(opts.ready_timeout_s)
+        # A thermal soak is ready only after its minimum (N minutes) plus a temperature
+        # plateau, so it needs a ready timeout that is at least the minimum plus the
+        # plateau window — the generic default (300 s) would time out a default 5-minute
+        # soak before it finishes.
+        m = re.fullmatch(r"soak(?:(\d+(?:\.\d+)?))?", condition)
+        ready_timeout = opts.ready_timeout_s
+        if m is not None:
+            ready_timeout = max(ready_timeout,
+                                float(m.group(1) or "5") * 60.0 + 120.0)
+        ready = load.wait_ready(ready_timeout)
         if not ready:
             print(f"[grid] load {condition!r} never became ready; running without it",
                   file=sys.stderr)

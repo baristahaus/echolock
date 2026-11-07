@@ -15,8 +15,11 @@ Two things that make or break a measurement are recorded as declared state, not 
 `power_dpm_force_performance_level` (a locked "level N" makes every clock the GPU reports a
 constant of your own choosing) and `pp_od_clk_voltage` (an overclock in place).
 
-The kernel's `clock_event_reasons` equivalent, `throttle_status`, is stored raw: which bit means
-what is asic-specific, and guessing would be worse than saying nothing. See docs/amd.md.
+The kernel's `clock_event_reasons` equivalent, `throttle_status`, uses per-ASIC bit
+positions, so it is decoded only for asics with a table transcribed from the amdgpu driver
+(gfx10.3 and gfx12 on this machine, cited in the bit tables below); for every other asic the
+word stays raw and `clock_event_names` is null — guessing would be worse than saying nothing.
+See docs/amd.md.
 """
 
 from __future__ import annotations
@@ -31,10 +34,11 @@ from typing import Callable
 
 # gpu_metrics: {name: (offset, struct char, count)} for the start of the struct that every
 # gpu_metrics_v1_* revision shares, read off the field list in
-# drivers/gpu/drm/amd/include/kgd_pp_interface.h and verified on gpu_metrics_v1_3 hardware.
-# AMD appends fields at the end, so this prefix is offered to any version and then cross-checked
-# against the text attributes: a layout that disagrees with hwmon is the wrong layout, not a
-# broken GPU. See gpu_metrics().
+# drivers/gpu/drm/amd/include/kgd_pp_interface.h and verified on gpu_metrics v1.3 (dGPU) and
+# v2.1 (iGPU) hardware.
+# AMD appends fields at the end, so this prefix is offered to any family-1 version and then
+# cross-checked against the text attributes: a layout that disagrees with hwmon is the wrong
+# layout, not a broken GPU. See gpu_metrics().
 GPU_METRICS_LAYOUT: dict[str, tuple[int, str, int]] = {
     "temperature_edge": (4, "H", 1), "temperature_hotspot": (6, "H", 1),
     "temperature_mem": (8, "H", 1), "average_gfx_activity": (16, "H", 1),
@@ -46,6 +50,32 @@ GPU_METRICS_LAYOUT: dict[str, tuple[int, str, int]] = {
     "pcie_link_speed": (76, "H", 1),
 }
 
+# Family 2 (APU): the scalar fields of gpu_metrics_v2_1 in kgd_pp_interface.h, same source.
+# The v2_1 struct is 120 bytes end to end, which is exactly what the v2.1 card on this
+# machine reports. AMD appends at the end (v2_2 adds indep_throttle_status, v2_3 the average
+# temperatures), so the prefix stands for every v2_* revision. Family 2 has no energy
+# accumulator and no PCIe link fields; its clocks are gfxclk/uclk/fclk, not gfx/uclk only.
+GPU_METRICS_LAYOUT_V2: dict[str, tuple[int, str, int]] = {
+    "temperature_gfx": (4, "H", 1), "temperature_soc": (6, "H", 1),
+    "average_gfx_activity": (28, "H", 1), "average_mm_activity": (30, "H", 1),
+    "average_socket_power": (40, "H", 1), "average_cpu_power": (42, "H", 1),
+    "average_soc_power": (44, "H", 1), "average_gfx_power": (46, "H", 1),
+    "average_gfxclk_frequency": (64, "H", 1), "average_uclk_frequency": (68, "H", 1),
+    "average_fclk_frequency": (70, "H", 1), "current_gfxclk": (76, "H", 1),
+    "current_uclk": (80, "H", 1), "current_fclk": (82, "H", 1),
+    "throttle_status": (108, "I", 1), "fan_pwm": (112, "H", 1),
+}
+
+
+def _layout_for(version: int) -> dict[str, tuple[int, str, int]] | None:
+    """The verified layout for a gpu_metrics struct family, or None: a family with no
+    offsets read off the kernel header is not decoded at all, rather than guessed."""
+    if version == 1:
+        return GPU_METRICS_LAYOUT
+    if version == 2:
+        return GPU_METRICS_LAYOUT_V2
+    return None
+
 # The driver writes all-ones for a metric this GPU does not have.
 UNSUPPORTED = {0xFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF}
 
@@ -55,6 +85,63 @@ PARAMS_WORTH_RECORDING = (
     "compute_scheduler", "debug_disable", "gem_debugfs", "gpu_timeout", "mmhub_pg",
     "noretry", "sg_display", "si_support", "amdkfd_support", "ps_report_interval",
 )
+
+# The gpu_metrics `throttle_status` word is built by the driver from SMU metrics with
+# per-ASIC bit positions (the struct comment in v2_2 and later calls it
+# "Throttle status (ASIC dependent)"), so a bit's meaning without the asic's table is
+# noise. A word is decoded only for a family with a table transcribed bit-for-bit from
+# the amdgpu driver (Linux master, read 2026-11-06); the port covers exactly the asics
+# on this machine:
+#
+#   gfx10.3 (Renoir/Raphael APU class, SMU v12):
+#     drivers/gpu/drm/amd/pm/swsmu/smu12/renoir_ppt.c   — renoir_throttler_map[]
+#     drivers/gpu/drm/amd/pm/swsmu/inc/pmfw_if/smu12_driver_if.h
+#                                                        — THROTTLER_STATUS_BIT_*
+#   gfx12 (RDNA4, MP1 v14.0.2/3):
+#     drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_2_ppt.c
+#                                                        — smu_v14_0_2_throttler_map[],
+#                                                          smu_v14_0_2_get_throttler_status()
+#     drivers/gpu/drm/amd/pm/swsmu/inc/pmfw_if/smu14_driver_if_v14_0.h
+#                                                        — THROTTLER_*_BIT, THROTTLER_COUNT
+#
+# Other families have no table here and stay raw with clock_event_names null; adding one
+# means transcribing its table with the same citation, not guessing positions.
+THROTTLE_BITS_GFX10_3: dict[int, str] = {
+    0: "SPL", 1: "FPPT", 2: "SPPT", 3: "SPPT_APU", 4: "THM_CORE", 5: "THM_GFX",
+    6: "THM_SOC", 7: "TDC_VDD", 8: "TDC_SOC", 9: "PROCHOT_CPU", 10: "PROCHOT_GFX",
+    11: "EDC_CPU", 12: "EDC_GFX",
+}
+THROTTLE_BITS_GFX12: dict[int, str] = {
+    0: "TEMP_EDGE", 1: "TEMP_HOTSPOT", 2: "TEMP_HOTSPOT_GFX", 3: "TEMP_HOTSPOT_SOC",
+    4: "TEMP_MEM", 5: "TEMP_VR_GFX", 6: "TEMP_VR_SOC", 7: "TEMP_VR_MEM0",
+    8: "TEMP_VR_MEM1", 9: "TEMP_LIQUID0", 10: "TEMP_LIQUID1", 11: "TEMP_PLX",
+    12: "TDC_GFX", 13: "TDC_SOC", 14: "PPT0", 15: "PPT1", 16: "PPT2", 17: "PPT3",
+    18: "FIT", 19: "GFX_APCC_PLUS", 20: "GFX_DVO",
+}
+
+
+def _throttle_table(gfx_version: int | None) -> dict[int, str] | None:
+    """The bit table for a KFD gfx target version, or None when this family has none.
+    The version is the driver's decimal gfx target (kfd_device.c: major*10000 +
+    minor*100 + step — 100306 = gfx10.3.6, 120001 = gfx12.0.1)."""
+    if gfx_version is None:
+        return None
+    major, minor = gfx_version // 10000, (gfx_version // 100) % 100
+    if (major, minor) == (10, 3):
+        return THROTTLE_BITS_GFX10_3
+    if major == 12:
+        return THROTTLE_BITS_GFX12
+    return None
+
+
+def throttle_names(word: int, gfx_version: int | None) -> list[str] | None:
+    """The active throttler bits of a `throttle_status` word, as names — or None when the
+    asic has no citable bit table, in which case the word stays raw. An empty list is a
+    real answer: a known asic, nothing active."""
+    table = _throttle_table(gfx_version)
+    if table is None:
+        return None
+    return [name for bit, name in sorted(table.items()) if (word >> bit) & 1]
 
 
 def _read(path: str | Path, cast: Callable[[str], object] = str):
@@ -167,8 +254,10 @@ def hwmon(dev: Path) -> dict:
 
 
 def gpu_metrics(dev: Path) -> dict:
-    """Decodes gpu_metrics into a dict, or says why it could not. Never the source of a headline
-    number: it supplies the throttle word, the energy counter and per-engine activity."""
+    """Decodes gpu_metrics into a dict, or says why it could not. Never the source of a
+    headline number: it supplies the throttle word, the energy counter and per-engine
+    activity. The layout is chosen by struct family (v1_* and v2_* have different field
+    orders); a family with no verified layout is not decoded at all."""
     path = dev / "gpu_metrics"
     try:
         blob = path.read_bytes()
@@ -177,8 +266,12 @@ def gpu_metrics(dev: Path) -> dict:
     if len(blob) < 4:
         return {"error": f"too short ({len(blob)} bytes)"}
     size, version, revision = struct.unpack_from("<HBB", blob, 0)
+    layout = _layout_for(version)
+    if layout is None:
+        return {"error": f"no verified layout for gpu_metrics family v{version}.{revision}",
+                "struct_version": version, "struct_revision": revision, "size": size}
     out: dict = {"struct_version": version, "struct_revision": revision, "size": size}
-    for name, (offset, char, count) in GPU_METRICS_LAYOUT.items():
+    for name, (offset, char, count) in layout.items():
         if offset + struct.calcsize(char) * count > len(blob):
             continue                                # this struct is shorter than the layout
         raw = struct.unpack_from("<" + char * count, blob, offset)
@@ -186,6 +279,16 @@ def gpu_metrics(dev: Path) -> dict:
         if isinstance(value, int) and value in UNSUPPORTED:
             continue                                # this GPU cannot report it
         out[name] = value
+    if version == 2:
+        # Family 2 is filled by the SMU v12 ppt (renoir class), where the temperatures
+        # are centi-Celsius (smu12_driver_if.h), unlike family 1's plain degrees. The
+        # cross-check below re-verifies the reading against hwmon before it is trusted.
+        for f in ("temperature_gfx", "temperature_soc"):
+            if f in out:
+                out[f + "_c"] = out.pop(f) / 100.0
+    if "throttle_status" in out:
+        out["throttle_names"] = throttle_names(out["throttle_status"],
+                                               card_gfx_version(dev.parent))
     out["cross_check"] = _cross_check(dev, (version, revision))
     if not any(out["cross_check"].values()):
         return {"error": f"layout v{version}.{revision} did not cross-check, not trusting it",
@@ -196,17 +299,19 @@ def gpu_metrics(dev: Path) -> dict:
 
 def _cross_check(dev: Path, version: tuple[int, int]) -> dict:
     """Agreement with two independent sources, required before any decoded value is trusted: the
-    clock must be one the part can run at, and the edge temperature must be what hwmon says. Done
+    clock must be one the part can run at, and the temperature must be what hwmon says (family 1's
+    edge, family 2's gfx — on the APU that is what the hwmon edge sensor reports). Done
     once per process and layout -- checking every second would make the verdict wobble when the
     part idles into a state the tables do not list."""
     key = (str(dev), version)
     if key not in _LAYOUT_CHECKED:
+        layout = _layout_for(version[0]) or {}
         checks: dict[str, bool] = {}
         states = dpm_table(dev, "pp_dpm_sclk").get("states") or {}
         blob = {}
         try:
             raw = (dev / "gpu_metrics").read_bytes()
-            for name, (offset, char, count) in GPU_METRICS_LAYOUT.items():
+            for name, (offset, char, count) in layout.items():
                 if offset + struct.calcsize(char) * count <= len(raw):
                     blob[name] = struct.unpack_from("<" + char * count, raw, offset)[0]
         except OSError:
@@ -216,9 +321,15 @@ def _cross_check(dev: Path, version: tuple[int, int]) -> dict:
             if clk is not None and states and clk not in UNSUPPORTED:
                 checks[field + "_in_dpm_table"] = any(abs(clk - v) <= max(15.0, 0.1 * v)
                                                       for v in states.values())
-        edge, hw = blob.get("temperature_edge"), hwmon(dev).get("temp_edge_c")
+        if version[0] == 1:
+            edge, check_name = blob.get("temperature_edge"), "temperature_edge_matches_hwmon"
+        else:
+            raw_gfx = blob.get("temperature_gfx")
+            edge = raw_gfx / 100.0 if raw_gfx is not None else None
+            check_name = "temperature_gfx_matches_hwmon"
+        hw = hwmon(dev).get("temp_edge_c")
         if edge is not None and hw is not None and edge not in UNSUPPORTED:
-            checks["temperature_edge_matches_hwmon"] = abs(edge - hw) <= 5
+            checks[check_name] = abs(edge - hw) <= 5
         _LAYOUT_CHECKED[key] = checks
     return _LAYOUT_CHECKED[key]
 
@@ -256,6 +367,62 @@ def _kfd_nodes() -> list[dict]:
     return out
 
 
+_KFD_LOCATIONS: dict[tuple[int, int], int] | None = None   # scanned once per process
+
+
+def _kfd_gpu_locations() -> dict[tuple[int, int], int]:
+    """KFD's GPU nodes as {(domain, pci_dev_id): gfx target version}, read straight off
+    the node properties. location_id is the kernel's pci_dev_id() (kfd_topology.c sets it
+    from the PCI address), which is PCI_DEVID (include/linux/pci.h): (bus << 8) |
+    (slot << 3) | func, 16 bits; the node's `domain` property carries the PCI domain
+    number separately. Matching on (domain, devid) is the card's own address, repacked
+    the same way. A node with cpu_cores_count set is the CPU and has no gfx version."""
+    global _KFD_LOCATIONS
+    if _KFD_LOCATIONS is None:
+        out: dict[tuple[int, int], int] = {}
+        for node in glob.glob("/sys/class/kfd/kfd/topology/nodes/[0-9]*"):
+            props: dict[str, str] = {}
+            try:
+                for line in Path(node, "properties").read_text().splitlines():
+                    k, _, v = line.partition(" ")
+                    props[k] = v.strip()
+            except OSError:
+                continue
+            if int(props.get("cpu_cores_count") or 0):
+                continue
+            gfx = props.get("gfx_ip_version") or props.get("gfx_target_version")
+            try:
+                out[(int(props.get("domain", 0)), int(props["location_id"]))] = int(gfx)
+            except (KeyError, TypeError, ValueError):
+                continue
+        _KFD_LOCATIONS = out
+    return _KFD_LOCATIONS
+
+
+_KFD_GFX: dict[str, int | None] = {}    # resolved card device path -> gfx target version
+
+
+def card_gfx_version(card: Path) -> int | None:
+    """The card's gfx target version (e.g. 120001 = gfx12.0.1, the driver's decimal
+    gfx target), from KFD's node properties matched by PCI address, resolved once per
+    card. None when KFD does not expose it (KFD off, or a card outside the topology) —
+    the asic-specific counters then stay raw rather than guessed."""
+    key = str(Path(card, "device").resolve())
+    if key not in _KFD_GFX:
+        loc: tuple[int, int] | None = None
+        try:
+            dombus, _, devfunc = Path(card, "device").resolve().name.rpartition(":")
+            dom, _, bus = dombus.partition(":")
+            dev, _, func = devfunc.partition(".")
+            # PCI_DEVID (include/linux/pci.h), the packing KFD's location_id uses.
+            loc = (int(dom, 16), (int(bus, 16) << 8) | (int(dev, 16) << 3)
+                   | (int(func, 16) if func else 0))
+        except ValueError:
+            loc = None
+        _KFD_GFX[key] = _kfd_gpu_locations().get(loc) if loc is not None else None
+    return _KFD_GFX[key]
+
+
 def sample(card: Path, index: int) -> dict:
     """One sample in the same shape env/nvml.py produces, so report/ needs no AMD branch."""
     dev = card / "device"
@@ -279,8 +446,10 @@ def sample(card: Path, index: int) -> dict:
     }
     m = gpu_metrics(dev)
     if "throttle_status" in m:
-        rec["clock_event_reasons"] = m["throttle_status"]     # raw; bit meanings are asic-specific
-        rec["clock_event_names"] = None
+        rec["clock_event_reasons"] = m["throttle_status"]
+        # A list when the asic has a citable bit table (decoded names, possibly empty);
+        # null when the word is raw because no table covers this asic.
+        rec["clock_event_names"] = m.get("throttle_names")
     if "energy_accumulator" in m:
         rec["energy_mj"] = m["energy_accumulator"]
     for k in ("average_gfx_activity", "average_umc_activity", "average_mm_activity"):
@@ -304,6 +473,7 @@ def describe(card: Path) -> dict:
         "vendor_id": _read(dev / "vendor"), "device_id": _read(dev / "device"),
         "revision": _read(dev / "revision"), "subsystem_id": _read(dev / "subsystem_device"),
         "driver": Path(dev / "driver").resolve().name if (dev / "driver").exists() else None,
+        "gfx_version": card_gfx_version(card),
         "vbios_version": _read(dev / "vbios_version"),
         "vbios_build": _read(dev / "vbios_build"),
         "vram_total_bytes": _read_int(dev / "mem_info_vram_total"),

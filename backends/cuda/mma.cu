@@ -1,14 +1,13 @@
 // mma: what each tensor-core math format actually delivers, measured with the hardware's own MMA
 // instructions and verified numerically. Spec: probes/mma/spec.md.
 //
-// WMMA formats (fp16, bf16, tf32, int8) load operands from global memory through the WMMA API, so
-// their fragment layouts are handled by the compiler. fp8 e4m3 and fp4 e2m1 use hand-written PTX
-// whose fragment layouts follow the PTX m16n8k32 encoding: four elements per .b32 register, and
-// for e2m1 one element per byte, the 4-bit value in the central four bits of the byte (PTX ISA
-// kind::f8f6f4 packing; verified on sm_120a hardware)
-// spec and on sm_120a hardware). Every format's result is checked element-wise against a host
-// reference computed in exact arithmetic, so a mis-encoded operand layout fails loudly instead of
-// posting a plausible throughput.
+// WMMA formats (fp16, tf32, int8) load operands from global memory through the WMMA API, so
+// their fragment layouts are handled by the compiler. bf16, fp8 e4m3 and fp4 e2m1 use
+// hand-written PTX whose fragment layouts follow the PTX m16n8k16 (bf16) and m16n8k32
+// (fp8/fp4) encodings: for e2m1 one element per byte, the 4-bit value in the central four bits
+// of the byte (PTX ISA kind::f8f6f4 packing; verified on sm_120a hardware). Every format's
+// result is checked element-wise against a host reference computed in exact arithmetic, so a
+// mis-encoded operand layout fails loudly instead of posting a plausible throughput.
 //
 // fp4 needs a family-specific build target (compute_120a/compute_121a, i.e. the 'a' targets):
 // kind::f8f6f4 is not in plain compute_120/121, and the probe reports fp4 as not built rather
@@ -18,6 +17,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <cmath>
 #include <functional>
 #include <map>
 #include <mma.h>
@@ -59,6 +59,14 @@ bool wants(const Options& o, const std::string& f) {
 // fp4 grid {0, 0.5, 1, 1.5, 2}, fp8 adds nothing, fp16/bf16/tf32 take small integers.
 float a_pattern(int m, int k) { return 0.5f * static_cast<float>((m * 13 + k * 7) % 5); }  // [0, 2]
 float b_pattern(int k, int n) { return 0.5f * static_cast<float>((k * 11 + n * 5) % 5); }  // [0, 2]
+// The shared integer pattern: fp16/bf16/int8 use exactly these values in both backends
+// (backends/cuda/mma.cu and backends/vulkan/mma.cpp), so the base-tile reference -- and its
+// ref_xor checksum -- is identical across backends. tf32/fp8/fp4 keep the fractional grid
+// above (the fp4 e2m1 grid needs the 0.5 steps) and are excluded from ref_xor. Both terms
+// must depend on their second index (n*3, not n*5, which vanishes mod 5): a row-constant tile
+// makes the 16x8 ref_xor cancel to zero.
+float a_shared(int m, int k) { return static_cast<float>((m * 13 + k * 7) % 5 - 2); }      // [-2, 2]
+float b_shared(int k, int n) { return static_cast<float>((k * 11 + n * 3) % 5 - 2); }      // [-2, 2]
 
 // ---- host reference -----------------------------------------------------------------------------
 
@@ -95,6 +103,41 @@ bool matrix_ok_int(const int* got, const std::vector<double>& want, Obj* detail)
         }
     }
     return true;
+}
+
+// ref_xor: the cross-backend checksum of the base tile. The 16x8 region (the left half of a
+// 16-wide tile, the whole tile when it is 8 wide) XORed as int64 bit patterns, row-major (i, j).
+// A pure function of the operand pattern (a documented constant, identical in both backends,
+// no time-seeding): the same value on every backend and every run for the same hardware and
+// format. The guard keeps it meaningful: all 128 values must be exact integers.
+bool ref_xor64(const std::vector<double>& d, int n_cols, std::uint64_t* out) {
+    std::uint64_t x = 0;
+    for (int i = 0; i < 16; ++i) {
+        for (int j = 0; j < 8; ++j) {
+            const double v = d[std::size_t(i) * n_cols + j];
+            if (v != std::floor(v)) { return false; }
+            x ^= static_cast<std::uint64_t>(static_cast<std::int64_t>(v));
+        }
+    }
+    *out = x;
+    return true;
+}
+
+// The additional verified record the crosscheck consumes (report/diff.py's ref_xor_details
+// scans check records for a string detail containing "ref_xor"): one check per format,
+// detail = the string "ref_xor=<hex>". pass tracks the format's matrix check, because the
+// checksum is a claim about words the oracle verified; the backends' strings compare exactly.
+void ref_xor_check(const std::string& fmt, bool pass, const std::vector<double>& ref,
+                   int n_cols) {
+    std::uint64_t x = 0;
+    if (!ref_xor64(ref, n_cols, &x)) {
+        note("ref_xor " + fmt +
+             ": base-tile reference is not all integers; no checksum record");
+        return;
+    }
+    if (!pass) { ++identity().failed_checks; }
+    emit("check", Obj().str("name", fmt + ".ref_xor").boolean("pass", pass)
+                      .str("detail", std::string("ref_xor=") + hex64(x)));
 }
 
 // ---- WMMA kernels ---------------------------------------------------------------------------------
@@ -372,10 +415,10 @@ int main(int argc, char** argv) {
         const std::string fmt = "fp16";
         half A[256], B[256];
         for (int m = 0; m < 16; ++m) {
-            for (int k = 0; k < 16; ++k) { A[m * 16 + k] = __float2half(a_pattern(m, k)); }
+            for (int k = 0; k < 16; ++k) { A[m * 16 + k] = __float2half(a_shared(m, k)); }
         }
         for (int k = 0; k < 16; ++k) {
-            for (int n = 0; n < 16; ++n) { B[k * 16 + n] = __float2half(b_pattern(k, n)); }
+            for (int n = 0; n < 16; ++n) { B[k * 16 + n] = __float2half(b_shared(k, n)); }
         }
         half *dA = nullptr, *dB = nullptr;
         float* dD = nullptr;
@@ -391,14 +434,14 @@ int main(int argc, char** argv) {
         EL_CUDA(cudaStreamSynchronize(stream));
         std::vector<float> got(256);
         EL_CUDA(cudaMemcpy(got.data(), dD, 256 * sizeof(float), cudaMemcpyDeviceToHost));
+        const auto ref = reference(16, 16, 16, 1.0, a_shared, b_shared);
         Obj detail;
-        check(fmt + ".matrix", matrix_ok(got.data(), reference(16, 16, 16, 1.0, a_pattern,
-                                                                b_pattern), &detail),
-              detail);
+        const bool matrix_pass = matrix_ok(got.data(), ref, &detail);
+        check(fmt + ".matrix", matrix_pass, detail);
+        ref_xor_check(fmt, matrix_pass, ref, 16); // 16x16 tile: checksum the left 16x8 half
 
         float* out = nullptr;
         EL_CUDA(cudaMalloc(&out, warps * kChains * 256 * sizeof(float)));
-        const auto ref = reference(16, 16, 16, 1.0, a_pattern, b_pattern);
         const auto launch = [&](int iters) {
             wmma_throughput_kernel<wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major>,
                                    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major>,
@@ -409,7 +452,7 @@ int main(int argc, char** argv) {
         const auto verify = [&](int iters, Obj* d) {
             std::vector<float> all(warps * kChains * 256);
             EL_CUDA(cudaMemcpy(all.data(), out, all.size() * sizeof(float), cudaMemcpyDeviceToHost));
-            std::vector<double> want = reference(16, 16, 16, double(iters), a_pattern, b_pattern);
+            std::vector<double> want = reference(16, 16, 16, double(iters), a_shared, b_shared);
             // The host reference of one chain; every warp and chain must match it element-wise.
             for (std::size_t w = 0; w < warps * kChains; ++w) {
                 if (!matrix_ok(all.data() + w * 256, want, d)) { return false; }
@@ -433,10 +476,10 @@ int main(int argc, char** argv) {
         // A: 16x16 bf16 row-major; B: 16x8 bf16 (k x n) row-major.
         std::vector<__nv_bfloat16> A(256), B(128);
         for (int m = 0; m < 16; ++m) {
-            for (int k = 0; k < 16; ++k) { A[std::size_t(m) * 16 + k] = __float2bfloat16(a_pattern(m, k)); }
+            for (int k = 0; k < 16; ++k) { A[std::size_t(m) * 16 + k] = __float2bfloat16(a_shared(m, k)); }
         }
         for (int k = 0; k < 16; ++k) {
-            for (int n = 0; n < 8; ++n) { B[std::size_t(k) * 8 + n] = __float2bfloat16(b_pattern(k, n)); }
+            for (int n = 0; n < 8; ++n) { B[std::size_t(k) * 8 + n] = __float2bfloat16(b_shared(k, n)); }
         }
         __nv_bfloat16 *dA = nullptr, *dB = nullptr;
         float* dD = nullptr;
@@ -451,10 +494,11 @@ int main(int argc, char** argv) {
         EL_CUDA(cudaStreamSynchronize(stream));
         std::vector<float> got(128);
         EL_CUDA(cudaMemcpy(got.data(), dD, 128 * sizeof(float), cudaMemcpyDeviceToHost));
+        const auto ref = reference(16, 8, 16, 1.0, a_shared, b_shared);
         Obj detail;
-        check(fmt + ".matrix",
-              matrix_ok(got.data(), reference(16, 8, 16, 1.0, a_pattern, b_pattern), &detail),
-              detail);
+        const bool matrix_pass = matrix_ok(got.data(), ref, &detail);
+        check(fmt + ".matrix", matrix_pass, detail);
+        ref_xor_check(fmt, matrix_pass, ref, 8); // 16x8 tile: the whole tile
 
         float* out = nullptr;
         EL_CUDA(cudaMalloc(&out, warps * kChains * 128 * sizeof(float)));
@@ -466,7 +510,7 @@ int main(int argc, char** argv) {
         const auto verify = [&](int iters, Obj* d) {
             std::vector<float> all(warps * kChains * 128);
             EL_CUDA(cudaMemcpy(all.data(), out, all.size() * sizeof(float), cudaMemcpyDeviceToHost));
-            std::vector<double> want = reference(16, 8, 16, double(iters), a_pattern, b_pattern);
+            std::vector<double> want = reference(16, 8, 16, double(iters), a_shared, b_shared);
             for (std::size_t w = 0; w < warps * kChains; ++w) {
                 if (!matrix_ok(all.data() + w * 128, want, d)) { return false; }
             }
@@ -546,12 +590,12 @@ int main(int argc, char** argv) {
         signed char A[256], B[256];
         for (int m = 0; m < 16; ++m) {
             for (int k = 0; k < 16; ++k) {
-                A[m * 16 + k] = static_cast<signed char>(int(a_pattern(m, k) * 2) - 3); // [-3, 1]
+                A[m * 16 + k] = static_cast<signed char>(a_shared(m, k)); // [-2, 2], shared pattern
             }
         }
         for (int k = 0; k < 16; ++k) {
             for (int n = 0; n < 16; ++n) {
-                B[k * 16 + n] = static_cast<signed char>(int(b_pattern(k, n) * 2) - 2); // [-2, 2]
+                B[k * 16 + n] = static_cast<signed char>(b_shared(k, n));
             }
         }
         signed char *dA = nullptr, *dB = nullptr;
@@ -568,14 +612,11 @@ int main(int argc, char** argv) {
         EL_CUDA(cudaStreamSynchronize(stream));
         std::vector<int> got(256);
         EL_CUDA(cudaMemcpy(got.data(), dD, 256 * sizeof(int), cudaMemcpyDeviceToHost));
+        const auto ref = reference(16, 16, 16, 1.0, a_shared, b_shared);
         Obj detail;
-        check(fmt + ".matrix",
-              matrix_ok_int(got.data(),
-                            reference(16, 16, 16, 1.0,
-                                      [](int m, int k) { return float(int(a_pattern(m, k) * 2) - 3); },
-                                      [](int k, int n) { return float(int(b_pattern(k, n) * 2) - 2); }),
-                            &detail),
-              detail);
+        const bool matrix_pass = matrix_ok_int(got.data(), ref, &detail);
+        check(fmt + ".matrix", matrix_pass, detail);
+        ref_xor_check(fmt, matrix_pass, ref, 16); // 16x16 tile: checksum the left 16x8 half
 
         int* out = nullptr;
         EL_CUDA(cudaMalloc(&out, warps * kChains * 256 * sizeof(int)));
@@ -589,10 +630,7 @@ int main(int argc, char** argv) {
         const auto verify = [&](int iters, Obj* d) {
             std::vector<int> all(warps * kChains * 256);
             EL_CUDA(cudaMemcpy(all.data(), out, all.size() * sizeof(int), cudaMemcpyDeviceToHost));
-            std::vector<double> want =
-                reference(16, 16, 16, double(iters),
-                          [](int m, int k) { return float(int(a_pattern(m, k) * 2) - 3); },
-                          [](int k, int n) { return float(int(b_pattern(k, n) * 2) - 2); });
+            std::vector<double> want = reference(16, 16, 16, double(iters), a_shared, b_shared);
             for (std::size_t w = 0; w < warps * kChains; ++w) {
                 if (!matrix_ok_int(all.data() + w * 256, want, d)) { return false; }
             }

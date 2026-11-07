@@ -29,8 +29,11 @@ Vulkan driver is closed.
 - **the 1 s sampler** — `gpu_source` becomes `amdgpu_sysfs` when NVML is absent and an amdgpu card
   exists, otherwise the chain stays NVML → DRM sysfs. Samples carry `sm_clock_mhz`,
   `mem_clock_mhz`, `temp_c`, `power_w`, `energy_mj`, `util_gpu_pct`, `util_mem_pct`, `pstate`,
-  `vram_used_bytes`, `gtt_used_bytes` and the raw throttle word, under the same key names the
-  NVIDIA path uses so the report needs no AMD branch.
+  `vram_used_bytes`, `gtt_used_bytes`, and the throttle word with its bit names
+  (`clock_event_names`) where a per-ASIC table exists — gfx10.3 and gfx12 — or null on other
+  families, under the same key names the NVIDIA path uses so the report needs no AMD branch.
+  The generic hwmon sensor set is discovered once per process; its slow sensor values are
+  re-read at the 60 s rescan rate without the directory walk.
 - **the environment snapshot** — `env.json` gains an `amd` section: driver version, the module
   parameters that change behaviour, KFD topology (CU count, waves per SIMD, LDS size, memory
   banks), and per card the ids, VBIOS, VRAM and vendor, PCIe current against max link, the DPM
@@ -42,7 +45,10 @@ Vulkan driver is closed.
 - `report/markdown.py` prints the AMD lines in the Environment section, including the sclk table
   and the forced level, because "the clocks were locked" is the first explanation to eliminate.
 
-Cost: 1.4 ms per sample for both cards, against 16 ms for the pre-existing generic hwmon walk.
+Cost: on this box (both cards) the per-sample cost is dominated by the per-card amdgpu sysfs
+reads, not the generic hwmon walk — a 30 s run measured 14.4 ms p50 before the hwmon cache and
+14.0 ms after, with one 45 ms discovery sample at the start; the cache removes the walk from the
+60 s rescan, so long runs stop paying it repeatedly.
 
 ### Why `gpu_metrics` is cross-checked
 
@@ -56,11 +62,13 @@ passes, the decode is dropped and the reason recorded:
 "gpu_metrics": {"error": "layout v2.1 did not cross-check, not trusting it", "cross_check": {...}}
 ```
 
-On the test machine the dGPU (struct 1.3, 120 bytes) decodes and matches hwmon exactly; the iGPU
-(struct 2.1, also 120 bytes) does not cross-check and is refused. One GPU's extras are therefore
-present and the other's absent, which is the honest outcome — the alternative is a table of
-guessed offsets. Adding a real layout for a family means adding offsets to `GPU_METRICS_LAYOUT`
-with the header as the source; the cross-check then tells you whether you were right.
+On the test machine both cards decode and cross-check: the dGPU (struct 1.3, 120 bytes) matches
+hwmon on edge temperature and both clock fields, and the iGPU (struct 2.1, also 120 bytes) decodes
+through the family-2 layout from `kgd_pp_interface.h` and cross-checks on its own terms —
+`average_gfxclk_frequency` is a level in the card's DPM table, and `temperature_gfx` (centi-
+Celsius on family 2) matches hwmon's edge temperature within 0.5°C. A struct whose family has no
+verified layout is refused with a record that says so — the alternative to a verified layout is a
+table of guessed offsets.
 
 Fields the driver fills with all-ones mean "this GPU has no such sensor"; they are dropped rather
 than reported.
@@ -81,13 +89,21 @@ These are the knobs that silently change a measurement, so `env.json` carries th
 
 ## Gaps
 
-1. **`throttle_status` bit meanings are asic-specific**, so it is stored raw and
-   `clock_event_names` stays null. Decoding needs a per-asic table (AMD SMI has one) — guessing
-   would be worse.
-2. No `gpu_metrics` layout is verified for the family-2 struct, so those extras are missing on the
-   iGPU class until someone adds offsets.
-3. The sampler's generic hwmon walk is the slow part of a sample and should be cached. Nothing to
-   do with AMD.
+1. ~~`throttle_status` bit meanings are asic-specific, so it is stored raw and
+   `clock_event_names` stays null.~~ **Closed for this box's ASICs** (2026-11-06). The driver's own
+   bit tables are transcribed into `env/amdgpu.py` — gfx10.3 (SMU v12, `renoir_ppt.c` +
+   `smu12_driver_if.h`) and gfx12 (MP1 v14.0.2, `smu_v14_0_2_ppt.c` +
+   `smu14_driver_if_v14_0.h`) — and the card's family is read from KFD's `gfx_target_version`
+   (matched to the card by PCI address), so `clock_event_names` carries the active names: this box
+   idled with the iGPU at 0x800 = `EDC_CPU` and the dGPU with nothing active. Other families still
+   store the word raw with null names — the table is per-ASIC, and guessing would be worse.
+2. ~~No `gpu_metrics` layout is verified for the family-2 struct.~~ **Closed** (2026-11-06). The
+   v2.1 layout from `kgd_pp_interface.h` is in `env/amdgpu.py`; the iGPU decodes and cross-checks
+   (see [Why `gpu_metrics` is cross-checked](#why-gpu_metrics-is-cross-checked)).
+3. ~~The sampler's generic hwmon walk should be cached.~~ **Closed** (2026-11-06). Discovery now
+   runs once per process and the 60 s rescan re-reads only the slow sensor values, without the
+   directory walk. The per-sample p50 barely moved (14.4 → 14.0 ms over a 30 s run), because on
+   this box the per-card amdgpu reads — not the walk — dominate the sample.
 
 ## What an AMD probe backend uses
 
@@ -128,6 +144,10 @@ for what Vulkan has not covered yet:
 
 - Kernel: `Documentation/ABI/testing/sysfs-driver-amdgpu`,
   `drivers/gpu/drm/amd/include/kgd_pp_interface.h` (gpu_metrics_v1_0 … v3_0), read 2026-10-05.
+  Throttle bit tables and the decimal `gfx_target_version`: `pm/swsmu/smu12/renoir_ppt.c`,
+  `pm/swsmu/inc/pmfw_if/smu12_driver_if.h`, `pm/swsmu/smu14/smu_v14_0_2_ppt.c`,
+  `pm/swsmu/inc/pmfw_if/smu14_driver_if_v14_0.h`, `amdkfd/kfd_device.c` (torvalds/linux, read
+  2026-11-06).
 - AMD SMI: `github.com/ROCm/amdsmi` (MIT; `include/amd_smi/amdsmi.h` — `amdsmi_init`,
   `amdsmi_get_socket_handles`, `amdsmi_get_gpu_metrics_info`, `amdsmi_get_clock_info`,
   `amdsmi_get_power_info`), and rocm.docs.amd.com/projects/amdsmi for the standalone package.

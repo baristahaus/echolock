@@ -61,7 +61,7 @@ with per-rep DVFS spreads visible in the series.
   without any CUDA dependency.
 - `backends/vulkan/common/vk_ctx.h`: shared Vulkan machinery (context, buffers with memory-type
   selection, pipeline from SPIR-V with optional pinned requiredSubgroupSize, timestamped
-  submissions, host-pointer import). The two older probes predate it and carry their own copy.
+  submissions, host-pointer import). Every probe in the backend uses it.
 - Vulkan headers vendored (`include/`, pinned to `vulkan-sdk-1.4.363`): no Vulkan SDK install
   needed, only the system loader (`libvulkan.so`).
 

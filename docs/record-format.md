@@ -126,3 +126,26 @@ writes the load generator's records there: intended level, ready, heartbeats, ac
 stop). A directory missing or broken in any of these still reports: the run's status cell
 says `unreadable` plus what could not be read, and whatever streams survived are laid out as
 usual. Only `probe.jsonl` carries the measurements, so that is the file worth recovering.
+
+## Load records (`src: load`, load.jsonl)
+
+`load_start` {load, intended, args}, `load_ready` {achieved}, `heartbeat` {achieved},
+`load_end` {achieved}, `load_error` {message}. The intended level is what the condition asked
+for; the achieved levels are what the generator measured, so "50%" can be checked instead of
+assumed.
+
+## Crosscheck records (`src: crosscheck`, crosscheck.jsonl)
+
+Written by `./echolock crosscheck PROBE --check` into **both** run directories, one per
+documented invariant (the tolerances are named in `report/diff.py` and in
+[crosscheck.md](crosscheck.md)):
+
+| type | Fields | Notes |
+|---|---|---|
+| `crosscheck` | `probe`, `name`, `a` {run_id, value}, `b` {run_id, value}, `verdict`, `tolerance` (or null for exact checks), `detail` | a phase-3 invariant's verdict |
+
+`verdict` is `within-tolerance` (a numeric invariant within its tolerance), `diverges`
+(beyond it, or exact-check strings that differ), `agrees` (exact match: identical values or
+equal mma `ref_xor` checksums), or `missing` (a value or checksum absent from one or both
+runs — recorded as such, never counted as a pass). The section in `crosscheck-report.md`
+renders the same records.

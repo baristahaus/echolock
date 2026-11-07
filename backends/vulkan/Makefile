@@ -11,7 +11,7 @@ CXX     ?= g++
 GLSLC   ?= glslc
 OUT     ?= ../../build/vulkan
 FLAGS   ?= -O2 -std=c++17 -Wall -Wextra
-PROBES  := memory pointer_chase mma sync clock file_page
+PROBES  := memory pointer_chase mma sync clock constants file_page
 
 SHADERS := read_fold chase spin_until clock_dual row_read
 # The cooperative-matrix shader is compiled once per math format (-D selects the operand types).
@@ -43,6 +43,10 @@ $(OUT)/mma: mma.cpp common/echolock_vk.h common/vk_ctx.h $(OUT)/coopmul_fp16.spv
 $(OUT)/sync: sync.cpp common/echolock_vk.h common/vk_ctx.h $(OUT)/spin_until.spv
 	@mkdir -p $(OUT)
 	$(CXX) $(FLAGS) -I include -I . sync.cpp -lvulkan -o $@
+
+$(OUT)/constants: constants.cpp common/echolock_vk.h common/vk_ctx.h
+	@mkdir -p $(OUT)
+	$(CXX) $(FLAGS) -I include -I . constants.cpp -lvulkan -o $@
 
 $(OUT)/clock: clock.cpp common/echolock_vk.h common/vk_ctx.h $(OUT)/clock_dual.spv
 

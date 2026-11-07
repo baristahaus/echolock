@@ -43,12 +43,12 @@ class PlanOptions:
     evict_file: str | None = None                  # file_page: evict by reading this file
 
 
-PROBES = ("memory", "file_page", "sync", "clock", "pointer_chase", "mma")
+PROBES = ("memory", "file_page", "sync", "clock", "constants", "pointer_chase", "mma")
 BACKENDS = ("cuda", "vulkan")
 # What each backend implements; make_plan validates the pair, so the CLI can list the union.
 PROBES_BY_BACKEND = {
-    "cuda": ("memory", "file_page", "sync", "clock", "pointer_chase", "mma"),
-    "vulkan": ("memory", "file_page", "sync", "clock", "pointer_chase", "mma"),
+    "cuda": ("memory", "file_page", "sync", "clock", "constants", "pointer_chase", "mma"),
+    "vulkan": ("memory", "file_page", "sync", "clock", "constants", "pointer_chase", "mma"),
 }
 
 
@@ -78,6 +78,11 @@ def make_plan(probe: str, backend: str, run_dir: Path, opts: PlanOptions) -> Pla
     if probe == "mma":
         return Plan(probe, backend,
                     [Step("mma", [exe, *opts.extra], timeout_s=600, drop_caches=True)])
+
+    if probe == "constants":
+        # A set of API and sysfs reads; nothing page-cache-related, so no drop, no scratch.
+        return Plan(probe, backend,
+                    [Step("constants", [exe, *opts.extra], timeout_s=120)])
 
     if probe == "pointer_chase":
         # The probe manages residency itself (resident walks then an evicted cold walk), so no

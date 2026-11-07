@@ -82,7 +82,28 @@ fingerprint, which pinpointed the overwrite immediately. Give each stimulus buff
 or refill before reuse — and be suspicious when a failure's value matches another buffer's
 expected XOR exactly.
 
-## 7. Read the packing section of the PTX spec before guessing nibble layouts (2026-10, mma/CUDA fp4)
+## 7. A build stamp that is not a prerequisite can lie about the build (2026-11, CUDA Makefile)
+
+**What happened.** `make -C backends/cuda ARCH=sm_120a` after an sm_121a build did nothing: the
+binary rules depended only on `%.cu` and the header, so ARCH was invisible to make, while the
+PHONY stamp target rewrote `build.json` to *claim* sm_120a. The next run's `env.json` would have
+recorded the wrong architecture for the binaries that actually executed. A first fix made the
+binaries depend on the stamp *file* while the rule still targeted the literal name `stamp` —
+make then never re-ran the check at all ("Nothing to be done"), which took a controlled
+121a→120a→90→121a sequence (counting actual nvcc lines) to expose.
+
+**Why it fooled us.** Each `make` exited 0, and the stamp — the one artifact that says what the
+binaries were built for — agreed with the requested ARCH while lying about the binaries.
+
+**Rules.**
+- The stamp must be the real target the binaries depend on, re-evaluated on every invocation
+  (`FORCE`), and rewritten only when its *content* changes; a changed stamp deletes the stale
+  binaries. An ARCH or flag switch that does not produce compile lines is a stale build, not a
+  no-op.
+- Verify build-system claims with a sequence, not a single build: switch, expect N compiles;
+  repeat, expect 0; switch back, expect N.
+
+## 8. Read the packing section of the PTX spec before guessing nibble layouts (2026-10, mma/CUDA fp4)
 
 The fp4 path failed on hardware twice before the spec was read end to end. The mma instruction
 pages say each .b32 register holds four e2m1 elements — but the packing note (under the

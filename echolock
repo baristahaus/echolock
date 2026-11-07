@@ -7,13 +7,22 @@
   ./echolock kmsg                              stream kernel-log GPU/OOM/hang events (JSONL)
   ./echolock run PROBE [options] [-- ARGS]     run a probe with env capture -> runs/<run_id>/
   ./echolock report RUN_DIR... [--out FILE]    Markdown report; several runs side by side
+  ./echolock platforms [--runs DIR] [--out F]  generate docs/platforms.md from the run corpus
+  ./echolock export RUNS... --out FILE.tar.gz  self-contained archive + content manifest
+  ./echolock diff A B [--tol 0.1] [--out F]    per canonical metric: both values, delta, verdict
+  ./echolock regress NEW [--against BASE]      diff against the auto-selected baseline
+  ./echolock suite [--backends] [--conditions] every probe x backend under each condition
+  ./echolock crosscheck PROBE [--check]        two backends side by side (+ phase-3 invariants)
 """
 
 from __future__ import annotations
 
 import argparse
+import io
+import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -205,6 +214,27 @@ def cmd_crosscheck(args: argparse.Namespace) -> int:
         print(f"[echolock] WARNING: the two runs used different devices: "
               + "; ".join(f"{b} -> {n}" for b, n in names.items())
               + " -- point both backends at the same GPU (see --a-args/--b-args)", file=sys.stderr)
+    if args.check:
+        from report.diff import crosscheck_verdicts, render_crosscheck_section
+        statuses = [json.loads((d / "manifest.json").read_text()).get("status") for d in dirs]
+        if "ok" in statuses and not all(s == "ok" for s in statuses):
+            print("[echolock] --check skipped: both runs must finish ok; "
+                  f"statuses: {', '.join(str(s) for s in statuses)}", file=sys.stderr)
+        else:
+            recs = crosscheck_verdicts(dirs[0], dirs[1])
+            if recs:
+                for d in dirs:
+                    with open(d / "crosscheck.jsonl", "a") as f:
+                        for r in recs:
+                            f.write(json.dumps(r) + "\n")
+                (opts.out_root / "crosscheck-report.md").write_text(
+                    (opts.out_root / "crosscheck-report.md").read_text()
+                    + render_crosscheck_section(recs))
+                for r in recs:
+                    print(f"[echolock] crosscheck {r['name']}: {r['verdict']} "
+                          f"({r['detail']})", file=sys.stderr)
+            else:
+                print("[echolock] --check: nothing to check (same backend?)", file=sys.stderr)
     print(opts.out_root / "crosscheck-report.md")
     return 0
 
@@ -216,6 +246,120 @@ def cmd_report(args: argparse.Namespace) -> int:
         Path(args.out).write_text(text)
     else:
         print(text)
+    return 0
+
+
+def cmd_platforms(args: argparse.Namespace) -> int:
+    from report.platforms import generate
+    out = Path(args.out) if args.out else ROOT / "docs" / "platforms.md"
+    n = generate(Path(args.runs), out)
+    print(f"{out} ({n} runs)")
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """A self-contained tar.gz of the given run directories: every file of each run, plus a
+    content-manifest.json at the archive root (run_id, files with sizes, manifest status)."""
+    import tarfile
+
+    runs = []
+    for p in args.runs:
+        d = Path(p)
+        if not (d.is_dir() and (d / "manifest.json").is_file()):
+            print(f"{p}: not a run directory (no manifest.json)", file=sys.stderr)
+            return 2
+        runs.append(d)
+    manifest = []
+    for d in runs:
+        m = json.loads((d / "manifest.json").read_text())
+        files = {}
+        for f in sorted(d.rglob("*")):
+            if f.is_file():
+                files[str(f.relative_to(d))] = f.stat().st_size
+        manifest.append({"run_id": m.get("run_id"), "dir": d.name,
+                         "status": m.get("status"), "files": files})
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(out, "w:gz") as tar:
+        data = json.dumps({"v": 1, "runs": manifest}, indent=1).encode()
+        info = tarfile.TarInfo("content-manifest.json")
+        info.size = len(data)
+        info.mtime = int(time.time())
+        tar.addfile(info, io.BytesIO(data))
+        for d in runs:
+            tar.add(d, arcname=d.name)
+    print(out)
+    return 0
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    from report.diff import diff_runs, render_diff
+    a, b = Path(args.a), Path(args.b)
+    for d in (a, b):
+        if not (d.is_dir() and (d / "manifest.json").is_file()):
+            print(f"{d}: not a run directory (no manifest.json)", file=sys.stderr)
+            return 2
+    diff = diff_runs(a, b, args.tol)
+    text = render_diff(diff)
+    if args.out:
+        Path(args.out).write_text(text)
+        print(args.out, file=sys.stderr)
+    else:
+        print(text)
+    return diff.exit_code
+
+
+def cmd_regress(args: argparse.Namespace) -> int:
+    """diff a new run against --against, or against the auto baseline: the most recent run
+    with the same probe, backend, label and declared device."""
+    from report.diff import candidates_for, diff_runs, find_baseline, render_diff
+    new = Path(args.new)
+    if not (new.is_dir() and (new / "manifest.json").is_file()):
+        print(f"{new}: not a run directory (no manifest.json)", file=sys.stderr)
+        return 2
+    if args.against:
+        base = Path(args.against)
+        if not (base.is_dir() and (base / "manifest.json").is_file()):
+            print(f"{base}: not a run directory (no manifest.json)", file=sys.stderr)
+            return 2
+    else:
+        base = find_baseline(new, Path(args.runs))
+        if base is None:
+            print("no baseline: same probe + backend + label + declared device not found "
+                  f"under {args.runs}; candidates:", file=sys.stderr)
+            for rd in candidates_for(new, Path(args.runs)):
+                print(f"  {rd.dir.name}  ({rd.manifest.get('label')} @ "
+                      f"{rd.manifest.get('started_utc')})", file=sys.stderr)
+            return 2
+        print(f"[echolock] baseline: {base}", file=sys.stderr)
+    diff = diff_runs(base, new, args.tol)
+    text = render_diff(diff)
+    if args.out:
+        Path(args.out).write_text(text)
+        print(args.out, file=sys.stderr)
+    else:
+        print(text)
+    return diff.exit_code
+
+
+def cmd_suite(args: argparse.Namespace) -> int:
+    from run.suite import run_suite
+    backends = tuple(args.backends.split(","))
+    for b in backends:
+        if b not in ("cuda", "vulkan"):
+            print(f"unknown backend {b!r} (have: cuda, vulkan)", file=sys.stderr)
+            return 2
+    conditions = tuple(args.conditions.split(","))
+    try:
+        report = run_suite(backends=backends, conditions=conditions,
+                           out_root=Path(args.out), probe_args=args.probe_args)
+    except (KeyboardInterrupt, RunInterrupted):
+        print("[echolock] suite interrupted; finished run directories are kept", file=sys.stderr)
+        return 130
+    except ValueError as e:  # an unknown load condition
+        print(str(e), file=sys.stderr)
+        return 2
+    print(report)
     return 0
 
 
@@ -283,12 +427,51 @@ def main() -> int:
     rep.add_argument("--pin-cpus", default="")
     rep.add_argument("--a-args", help="probe arguments for backend A, quoted")
     rep.add_argument("--b-args", help="probe arguments for backend B, quoted")
+    rep.add_argument("--check", action="store_true",
+                     help="apply the phase-3 invariants (docs/crosscheck.md) after both runs: "
+                          "verdicts as crosscheck records in both run dirs and a section in "
+                          "the report")
     rep.set_defaults(fn=cmd_crosscheck)
 
     rep = sub.add_parser("report", help="Markdown report for run directories")
     rep.add_argument("runs", nargs="+")
     rep.add_argument("--out")
     rep.set_defaults(fn=cmd_report)
+
+    p = sub.add_parser("platforms", help="generate docs/platforms.md from the run corpus")
+    p.add_argument("--runs", default=str(ROOT / "runs"), help="run root to read (default runs/)")
+    p.add_argument("--out", default=None, help="output file (default docs/platforms.md)")
+    p.set_defaults(fn=cmd_platforms)
+
+    e = sub.add_parser("export", help="tar.gz a run directory with a content manifest")
+    e.add_argument("runs", nargs="+", help="run directories")
+    e.add_argument("--out", required=True, help="archive path (.tar.gz)")
+    e.set_defaults(fn=cmd_export)
+
+    d = sub.add_parser("diff", help="diff two run directories on the canonical metrics")
+    d.add_argument("a", help="run directory A (baseline)")
+    d.add_argument("b", help="run directory B (new)")
+    d.add_argument("--tol", type=float, default=0.1, help="relative tolerance (default 0.1)")
+    d.add_argument("--out", help="write the report to FILE instead of stdout")
+    d.set_defaults(fn=cmd_diff)
+
+    g = sub.add_parser("regress", help="diff a run against its baseline")
+    g.add_argument("new", help="the run to check")
+    g.add_argument("--against", default=None,
+                   help="baseline run directory (default: most recent run with the same "
+                        "probe + backend + label + declared device)")
+    g.add_argument("--runs", default=str(ROOT / "runs"), help="run root to search (default runs/)")
+    g.add_argument("--tol", type=float, default=0.1, help="relative tolerance (default 0.1)")
+    g.add_argument("--out", help="write the report to FILE instead of stdout")
+    g.set_defaults(fn=cmd_regress)
+
+    s = sub.add_parser("suite", help="every probe x backend with a built binary, under each condition")
+    s.add_argument("--backends", default="cuda,vulkan",
+                   help="comma list of backends to sweep (default cuda,vulkan)")
+    s.add_argument("--conditions", default="idle",
+                   help="comma list of load conditions (default idle)")
+    s.add_argument("--out", default=str(ROOT / "runs"), help="run root for the run dirs and report")
+    s.set_defaults(fn=cmd_suite)
 
     # Everything after a bare "--" goes to the probe untouched.
     argv = sys.argv[1:]

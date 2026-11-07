@@ -70,10 +70,13 @@ bool wants(const Options& o, const std::string& f) {
     return o.formats.find(f) != std::string::npos;
 }
 
-// Exact operand patterns (same scheme as the CUDA mma probe): small values, exactly
-// representable in every format, so the host reference is exact.
+// Exact operand patterns, shared with backends/cuda/mma.cu for fp16/bf16/int8: the same
+// integer values in both backends, so the base-tile reference -- and its ref_xor checksum --
+// is identical across backends. Small integers are exactly representable in every format, so
+// the host reference is exact. Both terms depend on their second index (n*3, not n*5, which
+// vanishes mod 5): a row-constant tile makes the 16x8 ref_xor cancel to zero.
 double a_pattern(int m, int k) { return double((m * 13 + k * 7) % 5) - 2.0; } // [-2, 2]
-double b_pattern(int k, int n) { return double((k * 11 + n * 5) % 5) - 2.0; } // [-2, 2]
+double b_pattern(int k, int n) { return double((k * 11 + n * 3) % 5) - 2.0; } // [-2, 2]
 
 std::vector<double> reference() {
     std::vector<double> c(256, 0.0);
@@ -85,6 +88,47 @@ std::vector<double> reference() {
         }
     }
     return c;
+}
+
+// ref_xor: the cross-backend checksum of the base tile. The 16x8 region (the left half of a
+// 16-wide tile, the whole tile when it is 8 wide) XORed as int64 bit patterns, row-major (i, j).
+// A pure function of the operand pattern (a documented constant, identical in both backends,
+// no time-seeding): the same value on every backend and every run for the same hardware and
+// format. The guard keeps it meaningful: all 128 values must be exact integers.
+std::string hex64(std::uint64_t v) {
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "0x%016llx", static_cast<unsigned long long>(v));
+    return buf;
+}
+
+bool ref_xor64(const std::vector<double>& d, int n_cols, std::uint64_t* out) {
+    std::uint64_t x = 0;
+    for (int i = 0; i < 16; ++i) {
+        for (int j = 0; j < 8; ++j) {
+            const double v = d[std::size_t(i) * n_cols + j];
+            if (v != std::floor(v)) { return false; }
+            x ^= static_cast<std::uint64_t>(static_cast<std::int64_t>(v));
+        }
+    }
+    *out = x;
+    return true;
+}
+
+// The additional verified record the crosscheck consumes (report/diff.py's ref_xor_details
+// scans check records for a string detail containing "ref_xor"): one check per format,
+// detail = the string "ref_xor=<hex>". pass tracks the format's matrix check, because the
+// checksum is a claim about words the oracle verified; the backends' strings compare exactly.
+void ref_xor_check(const std::string& fmt, bool pass, const std::vector<double>& ref,
+                   int n_cols) {
+    std::uint64_t x = 0;
+    if (!ref_xor64(ref, n_cols, &x)) {
+        note("ref_xor " + fmt +
+             ": base-tile reference is not all integers; no checksum record");
+        return;
+    }
+    if (!pass) { ++identity().failed_checks; }
+    emit("check", Obj().str("name", fmt + ".ref_xor").boolean("pass", pass)
+                      .str("detail", std::string("ref_xor=") + hex64(x)));
 }
 
 // IEEE fp16 bits for the pattern values (multiples of 0.5 in [-2, 2]: normal, exactly
@@ -352,16 +396,15 @@ int main(int argc, char** argv) {
             d.uint("slot", verify_slot).uint("expected_slot", nonce).num("dispatch_us", verify_us);
             const bool ok = verify_slot == nonce && check_c(1, 1, 1.0, d); // one MulAdd
             check(tag + ".matrix", ok, d);
+            ref_xor_check(tag, ok, want, 16); // 16x16 tile: checksum the left 16x8 half
         }
 
         // ---- throughput series -----------------------------------------------------------------
-        // NOTE: on this machine (RADV GFX1201, Mesa 26.2.4) OpCooperativeMatrixMulAddKHR yields
-        // zeros/garbage while loads and stores verified correct, so the matrix oracle fails and
-        // every throughput number below is recorded verified=false. The probe refuses to claim an
-        // unverified rate; probe_end reports verify_failed. rocBLAS computes fp16 GEMM correctly
-        // on the same silicon, so the tensor cores are fine -- this is a RADV lowering defect,
-        // and this probe will start reporting verified numbers on a driver that fixes it (or on
-        // other hardware through this same backend).
+        // A RADV defect on this silicon (GFX1201) once made OpCooperativeMatrixMulAddKHR yield
+        // zeros/garbage while loads and stores verified correct, so the matrix oracle failed
+        // and the probe refused to claim unverified rates (rocBLAS GEMM on the same silicon
+        // was fine: a RADV lowering bug). The current driver fixed it; the oracle above still
+        // checks every word of every dispatch, so a regression fails loudly again.
         double warm = 1e30;
         for (int i = 0; i < 3; ++i) { warm = std::min(warm, run_timed(1000, rep_nonce(-2))); }
         const double iters_target = o.seconds * 1e6 / std::max(1.0, warm / 1000.0);

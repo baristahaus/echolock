@@ -14,7 +14,7 @@ NVCC    ?= $(shell command -v nvcc 2>/dev/null || echo /usr/local/cuda/bin/nvcc)
 ARCH    ?= sm_121a
 OUT     ?= ../../build/cuda
 FLAGS   ?= -O3 -std=c++17 -lineinfo -Xcompiler -Wall,-Wextra
-PROBES  := memory file_page sync clock pointer_chase mma
+PROBES  := memory file_page sync clock constants pointer_chase mma
 TOOLS   := gpuload
 STAMP   := $(OUT)/build.json
 
@@ -24,20 +24,36 @@ else
 GENCODE := -arch=$(ARCH)
 endif
 
-all: $(addprefix $(OUT)/,$(PROBES)) $(addprefix $(OUT)/,$(TOOLS)) stamp
+all: $(addprefix $(OUT)/,$(PROBES)) $(addprefix $(OUT)/,$(TOOLS))
 
-# What the probes were built with; env/capture.py copies it into every run's env.json. PHONY so it
-# is refreshed with the current ARCH/NVCC even when the binaries themselves are up to date.
-stamp:
+# What the probes were built with; env/capture.py copies it into every run's env.json. The rule
+# always runs (FORCE) but only rewrites the stamp when arch/nvcc/flags actually change; a changed
+# stamp deletes the old binaries, so building for one ARCH can never silently leave another
+# ARCH's artifacts in place (a stale binary impersonating a new build is the trap in
+# docs/lessons.md #2). When nothing changed the stamp keeps its mtime, so up-to-date binaries
+# stay up to date.
+$(STAMP): FORCE
 	@mkdir -p $(OUT)
-	@printf '{"arch": "%s", "nvcc": "%s", "flags": "%s", "built_utc": "%s"}\n' \
-	    "$(ARCH)" "$(NVCC)" "$(GENCODE) $(FLAGS)" "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" > $(STAMP)
+	@if [ -f $(STAMP) ] \
+	   && [ "$$(sed -n 's/.*"arch": "\([^"]*\)".*/\1/p' $(STAMP))" = "$(ARCH)" ] \
+	   && [ "$$(sed -n 's/.*"nvcc": "\([^"]*\)".*/\1/p' $(STAMP))" = "$(NVCC)" ] \
+	   && [ "$$(sed -n 's/.*"flags": "\([^"]*\)".*/\1/p' $(STAMP))" = "$(GENCODE) $(FLAGS)" ]; then \
+	    :; \
+	  else rm -f $(addprefix $(OUT)/,$(PROBES) $(TOOLS)); \
+	   printf '{"arch": "%s", "nvcc": "%s", "flags": "%s", "built_utc": "%s"}\n' \
+	    "$(ARCH)" "$(NVCC)" "$(GENCODE) $(FLAGS)" "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" > $(STAMP); \
+	  fi
 
-$(OUT)/%: %.cu common/echolock.cuh
+$(OUT)/%: %.cu common/echolock.cuh $(STAMP)
 	@mkdir -p $(OUT)
 	$(NVCC) $(FLAGS) $(GENCODE) $(EXTRA) $< -o $@
 
 clean:
 	rm -f $(addprefix $(OUT)/,$(PROBES)) $(addprefix $(OUT)/,$(TOOLS))
 
-.PHONY: all clean stamp
+# Compatibility name.
+stamp: $(STAMP)
+
+FORCE:
+
+.PHONY: all clean stamp FORCE

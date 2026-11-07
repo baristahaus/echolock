@@ -1,8 +1,8 @@
 // Shared Vulkan machinery for the backend's probes: instance/device/queue, buffers with memory
 // type selection, a compute pipeline from SPIR-V, descriptor sets, and timestamped submissions.
 //
-// The older probes (memory.cpp, pointer_chase.cpp) predate this header and carry their own copy;
-// everything here follows the rules they learned:
+// Every probe in the backend uses it. The rules it encodes are ones the older probes (memory,
+// pointer_chase) learned the hard way:
 //   - buffers the CPU streams are allocated from a HOST_CACHED type when one exists (RADV's
 //     non-cached host-visible type maps write-combined and makes CPU reads pathologically slow);
 //   - descriptor pools carry VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, because freeing

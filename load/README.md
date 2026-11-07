@@ -23,6 +23,7 @@ Record protocol (all records `src: "load"`, on the load's stdout, archived per r
 | `mem` | `mem80` | Touch a fraction of physical RAM (one byte per 4 KiB page) and hold it; ready only when the touch pass finished, resident size from /proc/self/statm. |
 | `io` | `io500` | Sequential file reads throttled to a target MB/s; whether the reads hit disk depends on file size vs page cache, and the record says which case it is. |
 | `gpu` | `gpu50` | `backends/cuda/gpuload`: duty-cycled streaming reads, every busy cycle XOR-checked, achieved duty and bandwidth measured from the kernel's own timing. |
+| `soak` | `soak`, `soak5`, `soak12` | `soak.py`: heat every source the machine offers until it is at steady temperature. CPU at 100 % duty via `cpuload.py`, GPU at 100 % duty via `gpuload` only when the binary and an NVIDIA GPU are both present (otherwise the gpu section is skipped and the evidence is in `load_start`); ready only after the longer of the minimum soak (the number, in minutes, default 5) and a temperature plateau (rise < 1 °C over 60 s). |
 
 ## Safety
 
