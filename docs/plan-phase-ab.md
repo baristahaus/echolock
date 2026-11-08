@@ -256,3 +256,28 @@ the Vulkan README line about the two older probes' own copies is corrected.
     run's first Vulkan memory run died on an unknown argument, diagnosed from stderr.log,
     with the broken run dir failing the record lint until removed.
   - Corpus: 6 new runs (40 in platforms.md); beads 3bb closed, 74k updated, 0mq filed.
+- 2026-11-08 — Two-backend verdict (echolock-74k): CUDA + Vulkan on the SAME 5070 Ti. The box
+  was the two-driver machine all along — the NVIDIA proprietary driver serves both APIs; the
+  Vulkan loader, glslc and vulkaninfo were the only missing pieces (pacman, after a corrupted
+  package cache and a keyring refresh). The vLLM engine (docker, qwen3.8-27b-nvfp4, TP-2) was
+  torn down for the runs at the user's instruction; the restart command is the logged docker
+  run line.
+  - First run failed by device selection: Vulkan device 0 is the Ryzen iGPU (RADV Mendocino);
+    vkCreateDevice -> VK_ERROR_INITIALIZATION_FAILED because the iGPU does not grant
+    VK_KHR_cooperative_matrix. `--device 1` (first 5070 Ti) fixed it — the same trap as the
+    5090 box, now a standing procedure (vulkaninfo --summary, then --device N).
+  - Verdict: fp16 100.4 vs 91.36 TFLOPS and bf16 100.1 vs 91.35 — within the 25 % tolerance,
+    ~9 % CUDA faster on identical hardware; fp16 dump bit-exact (0/256 words); shared ref_xor
+    checksums all 0x2. int8 not comparable: the NVIDIA driver lists int8 cooperative matrices
+    only as M16N16K32 (the probe's shape is M16N16K16, RADV's shape) — a driver shape-list
+    fact, recorded via the new vulkan.coopmat_configs declared record, reported `missing`
+    with the reason.
+  - The count mismatch (3 vs 2 checksums) exposed a false "diverges" in report/diff.py:
+    exact list equality flagged unequal-length lists even with equal common part. Fixed:
+    equal common part + count mismatch -> `missing` (unevaluable, with the counts); true
+    divergence names the first mismatched position. Regression test added; crosscheck
+    re-run so the corpus carries the corrected verdict (5fdb9f4).
+  - fp8: driver-supported (e4m3/e5m2 M16N16K32 in the config list) but glslang cannot
+    compile fp8 cooperative matrices — recorded as toolchain-unreachable, no number claimed.
+  - Corpus: runs 41-42 in platforms.md (the two two-backend mma runs); 74k closed; 0mq
+    remains (bf16 dump still not cross-comparable — same tile-shape gap as before).

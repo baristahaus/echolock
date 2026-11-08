@@ -56,6 +56,8 @@ One row per run directory under `runs/`: the device the probe declared, the stac
 | AMD Radeon RX 9070 XT (RADV GFX1201) | AMD | vulkan | 26.2.4 | refxor-baseline | 101.4 TFLOPS | pass | 20261107T002441Z-mma-vulkan-refxor-baseline | 2026-11-07 |
 | NVIDIA GeForce RTX 5070 Ti | NVIDIA | cuda | 13030 | idle | 100.3 TFLOPS | pass | 20261107T012507Z-mma-cuda-idle | 2026-11-07 |
 | NVIDIA GeForce RTX 5070 Ti | NVIDIA | cuda | 13030 | idle | 100.1 TFLOPS | pass | 20261107T023210Z-mma-cuda-idle | 2026-11-07 |
+| NVIDIA GeForce RTX 5070 Ti | NVIDIA | cuda | 13030 | two-backend | 100.4 TFLOPS | pass | 20261108T012106Z-mma-cuda-two-backend | 2026-11-08 |
+| NVIDIA GeForce RTX 5070 Ti | NVIDIA | vulkan | 98.228.256 | two-backend | 91.4 TFLOPS | pass | 20261108T012113Z-mma-vulkan-two-backend | 2026-11-08 |
 
 ## pointer_chase
 

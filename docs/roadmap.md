@@ -115,8 +115,10 @@ Done 2026-11-06/07, executed per [plan-phase-ab.md](plan-phase-ab.md).
 - [x] Equivalence suite, bit-exact mma hardware check and the cross-backend tag mapping
       (crosscheck phase 3): `crosscheck --check` with documented tolerances, `report/tags.py`
       mapping, and the mma `ref_xor` records that make "fp16/bf16/int8 are bit-exact" a
-      comparison of data. The first real two-backend verdict still needs a machine with both
-      backends — none here. (The work also found the old shared mma operand pattern was
+      comparison of data. The first real two-backend verdict landed on the 5070 Ti box, whose
+      NVIDIA driver serves both APIs — fp16/bf16 within tolerance (~9 % CUDA faster), fp16 dump
+      bit-exact, int8 not comparable (driver shape list; docs/crosscheck.md, "Two-backend
+      run"). (The work also found the old shared mma operand pattern was
       degenerate — every tile row constant, so the cross-backend checksum would have been
       structurally zero; it is fixed in both backends, see docs/lessons.md.) The split
       cross-machine run (9070 XT vulkan vs 5070 Ti cuda) confirmed the contracts hold across
@@ -135,8 +137,8 @@ Done 2026-11-06/07, executed per [plan-phase-ab.md](plan-phase-ab.md).
       `gpu_metrics` family-2 (v2.1) layout with the iGPU now decoding and cross-checking.
 
 Acceptance: `constants` passes on the 9070 XT, the iGPU and the RTX 5070 Ti; CI rejects a
-malformed record; the CUDA-vs-Vulkan verdict row lands on the first two-backend machine
-(phase C).
+malformed record; the CUDA-vs-Vulkan verdict row has landed (5070 Ti, one driver serving both
+APIs; docs/crosscheck.md).
 
 ### Phase B — corpus tooling
 

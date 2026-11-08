@@ -117,6 +117,11 @@ directories, so the verdict is data the report can render.
   identical result words, identical tile order), all three ref_xor checksums equal; the
   tolerance checks read as the platform gap (hop latency 67 vs 232 ns at 64 KiB; tensor
   ceilings within 14 %). Not the phase-3 verdict — see the section above.
+- [x] Two-backend verdict (phase 3, 2026-11-08): CUDA and Vulkan on the SAME 5070 Ti, one
+  driver serving both APIs — fp16/bf16 within tolerance (~9 % CUDA faster), fp16 dump
+  **bit-exact**, shared ref_xor checksums equal; int8 not comparable (driver lists it only
+  as M16N16K32), reported as missing with the reason. See "Two-backend run" below.
+
 ## Split run (2026-11-07): one probe, two machines, two backends
 
 The same probe, same arguments, idle, run on the two boxes in parallel — Vulkan/RADV on the
@@ -149,10 +154,53 @@ latency is ~3.5x lower at the smallest footprint (67 ns vs 232 ns) and ~2x at th
 L2-exceeding one, while its tensor ceilings sit within ~14 % of the 9070 XT's across all
 three formats.
 
-This is not the phase-3 verdict: that still needs one GPU with two drivers. What it does
-close is the "do the checksum and dump contracts hold across architectures" question — yes,
-they hold, including the layout: the word-by-word dump comparison found the two backends
-store the tile in the same order.
+The phase-3 verdict is complete (the section below); this run closed the "do the checksum
+and dump contracts hold across architectures" question — yes, they hold, including the
+layout: the word-by-word dump comparison found the two backends store the tile in the same
+order.
+
+## Two-backend run (2026-11-08): CUDA and Vulkan on ONE GPU — the phase-3 verdict
+
+The last phase-3 requirement was one GPU with two backends. The 5070 Ti box supplies it
+without special hardware: the NVIDIA proprietary driver serves both APIs (CUDA 13.3 runtime,
+Vulkan 1.4.341, both from driver 610.57.04), so the two columns differ only in API and
+implementation — not driver version, not silicon. `crosscheck mma --check --bitexact`,
+idle, same GPU:
+
+| check | cuda | vulkan | verdict |
+|---|---|---|---|
+| mma fp16 (TFLOPS) | 100.4 | 91.36 | within 25 % (-8.9 %) |
+| mma bf16 (TFLOPS) | 100.1 | 91.35 | within 25 % (-8.9 %) |
+| mma int8 (TFLOPS) | 200.1 | — | missing (finding 1) |
+| mma ref_xor checksums | 3 (all 0x2) | 2 (all 0x2) | missing — the 2 common are equal; the int8 checksum is unrecorded (finding 1) |
+| mma dump, fp16 (256 words) | — | — | **bit-exact**, operands identical |
+
+**Verdict: the two backends agree on everything comparable** — within the documented
+tolerances on both float formats, bit-exact on the dump, equal on every shared checksum.
+The ~9 % gap (CUDA faster) is the API/implementation gap on identical hardware: the
+smallest possible statement of "what the other API costs".
+
+Findings:
+
+1. **The int8 gap is the driver's shape list, not a defect.** The NVIDIA driver lists int8
+   cooperative matrices only as M16N16K32/M16N8K32; the probe's shape is M16N16K16 (what
+   RADV lists). The Vulkan run records a skip note, and the comparison reports `missing`,
+   not a divergence. The run also exposed and fixed a false finding in the comparator: a
+   count mismatch with an equal common part used to report "diverges" — `report/diff.py`
+   now reports it as unevaluable, with the count and the pointer to the skip notes.
+2. **fp8 is driver-supported but toolchain-unreachable.** The driver lists e4m3/e5m2
+   M16N16K32 configs; glslang cannot compile fp8 cooperative matrices yet, so the Vulkan
+   probe claims no fp8 number (CUDA measures 200.1 TFLOPS).
+3. **Vulkan device 0 on this box is the Ryzen iGPU** (RADV Mendocino, in the env capture).
+   The mma probe with the default device failed at `vkCreateDevice` with
+   VK_ERROR_INITIALIZATION_FAILED — the iGPU does not grant VK_KHR_cooperative_matrix —
+   and the run used `--device 1`. The same iGPU-default trap is already recorded in the
+   phase-2 notes above for the 5090 box; `vulkaninfo --summary` (device order) plus
+   `--device N` is the standing procedure on multi-vendor machines.
+4. **The driver's shape capability table is now corpus data.** The run's `declared` records
+   carry `vulkan.coopmat_configs` (15 configs: fp16 M16N16K16/M16N8K16/M16N8K8, fp32
+   accumulators, int8 K32, fp8 K32) — the fact that decided finding 1, recorded where the
+   other facts live.
 
 ## Next (the one candidate left) -- blocked on ONE driver, works on GB10
 
