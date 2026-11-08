@@ -384,10 +384,26 @@ def crosscheck_verdicts(a_dir: Path, b_dir: Path) -> list[dict]:
                                                len(ra), len(rb), VERDICT_AGREES, None,
                                                f"{len(ra)} ref_xor checksum(s) equal"))
             else:
-                recs.append(_crosscheck_record(probe, "mma.ref_xor", a, b, ra, rb,
-                                               VERDICT_B, None,
-                                               "ref_xor checksums differ: "
-                                               f"A={ra} B={rb}"))
+                n = min(len(ra), len(rb))
+                if ra[:n] == rb[:n]:
+                    # The common part agrees; one side ran more formats (a skipped format
+                    # records no checksum, e.g. int8 M16N16K16 absent from a driver's
+                    # cooperative-matrix config list). The invariant is not fully evaluable:
+                    # report that, not a divergence.
+                    which = "A" if len(ra) > len(rb) else "B"
+                    n_more = len(ra) if which == "A" else len(rb)
+                    recs.append(_crosscheck_record(probe, "mma.ref_xor", a, b,
+                                                   f"{n} of {n_more}", f"{n} of {n}",
+                                                   VERDICT_MISSING, None,
+                                                   f"equal for the {n} common checksum(s); "
+                                                   f"{which} recorded {n_more} (its run's "
+                                                   "skip notes say which format did not run)"))
+                else:
+                    at = next(i for i in range(n) if ra[i] != rb[i])
+                    recs.append(_crosscheck_record(probe, "mma.ref_xor", a, b, ra, rb,
+                                                   VERDICT_B, None,
+                                                   f"ref_xor checksums differ first at "
+                                                   f"position {at} (0-based): A={ra} B={rb}"))
         else:
             why = ("no ref_xor check records in "
                    + ", ".join(f"{r.manifest.get('run_id')}"

@@ -220,9 +220,9 @@ class CrosscheckTest(unittest.TestCase):
         self.assertEqual(by["memory.copy.h2d.host_visible"]["verdict"], "missing")
 
     def _mma_pair(self, a_xor, b_xor):
-        checks = [(f"{fmt}.result", True, f"ref_xor={a_xor[fmt]}" if a_xor else {})
+        checks = [(f"{fmt}.result", True, f"ref_xor={a_xor[fmt]}" if fmt in (a_xor or {}) else {})
                   for fmt in ("fp16", "bf16", "int8")]
-        checks_b = [(f"{fmt}.result", True, f"ref_xor={b_xor[fmt]}" if b_xor else {})
+        checks_b = [(f"{fmt}.result", True, f"ref_xor={b_xor[fmt]}" if fmt in (b_xor or {}) else {})
                     for fmt in ("fp16", "bf16", "int8")]
         make_run(self.root, "ra", "mma", "vulkan", "idle",
                  [("fp16_tflops", 100.0, "TFLOPS", {}),
@@ -252,6 +252,19 @@ class CrosscheckTest(unittest.TestCase):
         recs = diffmod.crosscheck_verdicts(self.root / "ra", self.root / "rb")
         by = {r["name"]: r for r in recs}
         self.assertEqual(by["mma.ref_xor"]["verdict"], "diverges")
+
+    def test_mma_ref_xor_count_mismatch_with_equal_common_part(self):
+        # The two-backend 5070 Ti run: the Vulkan driver lists int8 only as M16N16K32, so the
+        # Vulkan run records no int8 checksum. The common checksums agree; a length mismatch is
+        # an unevaluable invariant (missing), not a divergence.
+        self._mma_pair({"fp16": "ab", "bf16": "cd", "int8": "ef"},
+                       {"fp16": "ab", "bf16": "cd"})
+        recs = diffmod.crosscheck_verdicts(self.root / "ra", self.root / "rb")
+        by = {r["name"]: r for r in recs}
+        r = by["mma.ref_xor"]
+        self.assertEqual(r["verdict"], "missing")
+        self.assertIn("2 common", r["detail"])
+        self.assertIn("A recorded 3", r["detail"])
 
     def test_mma_ref_xor_absent_is_missing_not_pass(self):
         self._mma_pair({"fp16": "ab", "bf16": "cd", "int8": "ef"}, {})
