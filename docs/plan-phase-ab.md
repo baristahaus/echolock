@@ -260,8 +260,9 @@ the Vulkan README line about the two older probes' own copies is corrected.
   was the two-driver machine all along — the NVIDIA proprietary driver serves both APIs; the
   Vulkan loader, glslc and vulkaninfo were the only missing pieces (pacman, after a corrupted
   package cache and a keyring refresh). The vLLM engine (docker, qwen3.8-27b-nvfp4, TP-2) was
-  torn down for the runs at the user's instruction; the restart command is the logged docker
-  run line.
+  torn down for the runs at the user's instruction (a docker container serving a local 27B
+  model, TP-2 across both cards, port 8000); restarting it is one docker run line with the
+  same flags.
   - First run failed by device selection: Vulkan device 0 is the Ryzen iGPU (RADV Mendocino);
     vkCreateDevice -> VK_ERROR_INITIALIZATION_FAILED because the iGPU does not grant
     VK_KHR_cooperative_matrix. `--device 1` (first 5070 Ti) fixed it — the same trap as the
